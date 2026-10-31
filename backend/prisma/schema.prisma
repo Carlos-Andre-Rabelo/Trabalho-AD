@@ -1,0 +1,257 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum QueueMode {
+  SEPARATE_QUEUES
+  SINGLE_QUEUE
+  CUSTOM
+}
+
+enum CollectionStatus {
+  DRAFT
+  IN_PROGRESS
+  PAUSED
+  FINISHED
+}
+
+enum EventType {
+  ARRIVAL
+  DELIVERY
+  OBSERVATION
+}
+
+enum ServiceIntervalStatus {
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum InterruptionType {
+  PROTEIN_SHORTAGE
+  FOOD_REPLENISHMENT
+  SERVICE_HALT
+  OPERATIONAL_ISSUE
+  ATTENDANT_ABSENCE
+  OTHER
+}
+
+enum MeasurementMethod {
+  MEASURED
+  ESTIMATED
+}
+
+model User {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String
+  email         String         @unique
+  passwordHash  String         @map("password_hash")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  collections   Collection[]   @relation("UserCollections")
+  events        Event[]        @relation("UserEvents")
+  auditLogs     AuditLog[]     @relation("UserAuditLogs")
+
+  @@map("users")
+}
+
+model Collection {
+  id              String            @id @default(uuid()) @db.Uuid
+  ownerId         String            @map("owner_id") @db.Uuid
+  title           String
+  description     String?
+  location        String?
+  timezone        String            @default("America/Sao_Paulo")
+  queueMode       QueueMode         @default(SEPARATE_QUEUES) @map("queue_mode")
+  status          CollectionStatus  @default(DRAFT)
+  startedAt       DateTime?         @map("started_at")
+  endedAt         DateTime?         @map("ended_at")
+  notes           String?
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  owner           User              @relation("UserCollections", fields: [ownerId], references: [id], onDelete: Cascade)
+  attendants      Attendant[]
+  queues          Queue[]
+  events          Event[]
+  serviceIntervals ServiceInterval[]
+  interruptions   Interruption[]
+  proteinMeasurements ProteinMeasurement[]
+  pauses          CollectionPause[]
+  auditLogs       AuditLog[]
+
+  @@index([ownerId])
+  @@index([status])
+  @@map("collections")
+}
+
+model Attendant {
+  id            String         @id @default(uuid()) @db.Uuid
+  collectionId  String         @map("collection_id") @db.Uuid
+  code          String
+  displayName   String         @map("display_name")
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  collection    Collection     @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  queues        QueueAttendant[]
+  events        Event[]
+  serviceIntervals ServiceInterval[]
+  interruptions Interruption[]
+  proteinMeasurements ProteinMeasurement[]
+
+  @@unique([collectionId, code])
+  @@index([collectionId])
+  @@map("attendants")
+}
+
+model Queue {
+  id            String         @id @default(uuid()) @db.Uuid
+  collectionId  String         @map("collection_id") @db.Uuid
+  name          String
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  collection    Collection     @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  attendants    QueueAttendant[]
+  events        Event[]
+  serviceIntervals ServiceInterval[]
+
+  @@index([collectionId])
+  @@map("queues")
+}
+
+model QueueAttendant {
+  queueId      String     @map("queue_id") @db.Uuid
+  attendantId  String     @map("attendant_id") @db.Uuid
+
+  queue        Queue      @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  attendant    Attendant  @relation(fields: [attendantId], references: [id], onDelete: Cascade)
+
+  @@id([queueId, attendantId])
+  @@map("queue_attendants")
+}
+
+model Event {
+  id              String         @id @default(uuid()) @db.Uuid
+  collectionId    String         @map("collection_id") @db.Uuid
+  attendantId     String?        @map("attendant_id") @db.Uuid
+  queueId         String?        @map("queue_id") @db.Uuid
+  eventType       EventType      @map("event_type")
+  occurredAt      DateTime       @map("occurred_at")
+  recordedAt      DateTime       @default(now()) @map("recorded_at")
+  recordedBy      String         @map("recorded_by") @db.Uuid
+  idempotencyKey  String         @unique @map("idempotency_key")
+  metadata        Json?          @db.JsonB
+  isVoided        Boolean        @default(false) @map("is_voided")
+  voidedAt        DateTime?      @map("voided_at")
+  voidedBy        String?        @map("voided_by") @db.Uuid
+  voidReason      String?        @map("void_reason")
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  collection      Collection     @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  attendant       Attendant?     @relation(fields: [attendantId], references: [id], onDelete: SetNull)
+  queue           Queue?         @relation(fields: [queueId], references: [id], onDelete: SetNull)
+  user            User           @relation("UserEvents", fields: [recordedBy], references: [id])
+
+  @@index([collectionId, occurredAt])
+  @@index([collectionId, attendantId])
+  @@index([collectionId, eventType])
+  @@index([collectionId, isVoided])
+  @@map("events")
+}
+
+model ServiceInterval {
+  id            String                 @id @default(uuid()) @db.Uuid
+  collectionId  String                 @map("collection_id") @db.Uuid
+  attendantId   String                 @map("attendant_id") @db.Uuid
+  queueId       String?                @map("queue_id") @db.Uuid
+  startedAt     DateTime               @map("started_at")
+  endedAt       DateTime?              @map("ended_at")
+  durationMs    Int?                   @map("duration_ms")
+  status        ServiceIntervalStatus  @default(IN_PROGRESS)
+  createdAt     DateTime               @default(now()) @map("created_at")
+  updatedAt     DateTime               @updatedAt @map("updated_at")
+
+  collection    Collection             @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  attendant     Attendant              @relation(fields: [attendantId], references: [id], onDelete: Cascade)
+  queue         Queue?                 @relation(fields: [queueId], references: [id], onDelete: SetNull)
+  proteinMeasurements ProteinMeasurement[]
+
+  @@index([collectionId, attendantId, status])
+  @@map("service_intervals")
+}
+
+model Interruption {
+  id                String            @id @default(uuid()) @db.Uuid
+  collectionId      String            @map("collection_id") @db.Uuid
+  attendantId       String?           @map("attendant_id") @db.Uuid
+  interruptionType  InterruptionType  @map("interruption_type")
+  startedAt         DateTime          @map("started_at")
+  endedAt           DateTime?         @map("ended_at")
+  notes             String?
+  recordedBy        String?           @map("recorded_by") @db.Uuid
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  collection        Collection        @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  attendant         Attendant?        @relation(fields: [attendantId], references: [id], onDelete: SetNull)
+
+  @@index([collectionId])
+  @@map("interruptions")
+}
+
+model ProteinMeasurement {
+  id                 String             @id @default(uuid()) @db.Uuid
+  collectionId       String             @map("collection_id") @db.Uuid
+  attendantId        String             @map("attendant_id") @db.Uuid
+  serviceIntervalId  String?            @map("service_interval_id") @db.Uuid
+  amount             Float
+  unit               String             @default("g")
+  measurementMethod  MeasurementMethod  @default(MEASURED) @map("measurement_method")
+  notes              String?
+  recordedAt         DateTime           @default(now()) @map("recorded_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+
+  collection         Collection         @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  attendant          Attendant          @relation(fields: [attendantId], references: [id], onDelete: Cascade)
+  serviceInterval    ServiceInterval?   @relation(fields: [serviceIntervalId], references: [id], onDelete: SetNull)
+
+  @@index([collectionId, attendantId])
+  @@map("protein_measurements")
+}
+
+model CollectionPause {
+  id            String         @id @default(uuid()) @db.Uuid
+  collectionId  String         @map("collection_id") @db.Uuid
+  startedAt     DateTime       @map("started_at")
+  endedAt       DateTime?      @map("ended_at")
+  reason        String?
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  collection    Collection     @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  @@index([collectionId])
+  @@map("collection_pauses")
+}
+
+model AuditLog {
+  id              String         @id @default(uuid()) @db.Uuid
+  userId          String         @map("user_id") @db.Uuid
+  collectionId    String         @map("collection_id") @db.Uuid
+  action          String
+  entityType      String         @map("entity_type")
+  entityId        String         @map("entity_id")
+  previousValues  Json?          @map("previous_values") @db.JsonB
+  newValues       Json?          @map("new_values") @db.JsonB
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  user            User           @relation("UserAuditLogs", fields: [userId], references: [id])
+  collection      Collection     @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  @@index([collectionId, createdAt])
+  @@map("audit_logs")
+}
