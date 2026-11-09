@@ -82,6 +82,8 @@ export function createApp() {
   // Documentação OpenAPI / Swagger
   app.get('/api-docs/json', (_req, res) => res.json(openApiSpec));
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+  app.get('/api/docs/json', (_req, res) => res.json(openApiSpec));
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
   // Rotas da API REST
   app.use('/api/auth', authRouter);
@@ -111,3 +113,7 @@ export function createApp() {
 
   return app;
 }
+
+const app = createApp();
+export default app;
+export { app };
