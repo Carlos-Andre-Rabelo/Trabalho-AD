@@ -1,9 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
+import path from 'path';
+import fs from 'fs';
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { openApiSpec } from './docs/swagger.js';
+
+const appDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
 
 // Routers
 import { authRouter } from './modules/auth/auth.routes.js';
@@ -96,6 +100,27 @@ export function createApp() {
 
   // Dashboard geral
   app.get('/api/dashboard', authMiddleware, (req, res, next) => metricsController.getDashboard(req, res, next));
+
+  // Servir arquivos estáticos do frontend (produção e fallback universal)
+  const possiblePublicDirs = [
+    path.resolve(appDir, '../public'),
+    path.resolve(appDir, 'public'),
+    path.resolve(process.cwd(), 'backend/public'),
+    path.resolve(process.cwd(), 'public'),
+    path.resolve(process.cwd(), 'frontend/dist'),
+    path.resolve(appDir, '../../frontend/dist'),
+  ];
+  const publicDir = possiblePublicDirs.find((dir) => fs.existsSync(path.join(dir, 'index.html')));
+
+  if (publicDir) {
+    app.use(express.static(publicDir));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api')) {
+        return next();
+      }
+      res.sendFile(path.join(publicDir, 'index.html'));
+    });
+  }
 
   // 404 Handler
   app.use((_req, res) => {
