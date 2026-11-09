@@ -12,8 +12,8 @@ interface AttendantCardProps {
     id: string;
     startedAt: string;
   } | null;
-  onStartService: (attendantId: string) => Promise<void>;
-  onFinishService: (attendantId: string, serviceId?: string) => Promise<void>;
+  onStartService: (attendantId: string) => void | Promise<void>;
+  onFinishService: (attendantId: string, serviceId?: string) => void | Promise<void>;
   isCollectionActive: boolean;
 }
 
@@ -25,7 +25,6 @@ export const AttendantCard: React.FC<AttendantCardProps> = ({
   onFinishService,
   isCollectionActive,
 }) => {
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [elapsedServiceSeconds, setElapsedServiceSeconds] = useState(0);
 
   const isAttendantBusy = !!activeService;
@@ -46,27 +45,17 @@ export const AttendantCard: React.FC<AttendantCardProps> = ({
     return () => clearInterval(timer);
   }, [activeService]);
 
-  const handleStart = async () => {
-    if (isSubmitting || !isCollectionActive) return;
-    setIsSubmitting(true);
+  const handleStart = () => {
+    if (!isCollectionActive) return;
     triggerHaptic(35);
-    try {
-      await onStartService(attendant.id);
-    } finally {
-      setIsSubmitting(false);
-    }
+    onStartService(attendant.id);
   };
 
-  const handleFinish = async () => {
-    if (isSubmitting || !isCollectionActive) return;
-    setIsSubmitting(true);
+  const handleFinish = () => {
+    if (!isCollectionActive) return;
     triggerHaptic(50);
     playSuccessBeep();
-    try {
-      await onFinishService(attendant.id, activeService?.id);
-    } finally {
-      setIsSubmitting(false);
-    }
+    onFinishService(attendant.id, activeService?.id);
   };
 
   return (
@@ -102,9 +91,8 @@ export const AttendantCard: React.FC<AttendantCardProps> = ({
             variant="primary"
             size="touch"
             onClick={handleStart}
-            disabled={!isCollectionActive || isSubmitting}
-            isLoading={isSubmitting}
-            className="w-full font-bold text-base gap-2"
+            disabled={!isCollectionActive}
+            className="w-full font-bold text-base gap-2 select-none transform transition-transform active:scale-95"
           >
             <Play className="w-4 h-4 fill-current" />
             <span>Iniciar Atendimento ({attendant.code})</span>
@@ -114,9 +102,8 @@ export const AttendantCard: React.FC<AttendantCardProps> = ({
             variant="success"
             size="touch"
             onClick={handleFinish}
-            disabled={!isCollectionActive || isSubmitting}
-            isLoading={isSubmitting}
-            className="w-full font-bold text-base gap-2 bg-emerald-600 hover:bg-emerald-700"
+            disabled={!isCollectionActive}
+            className="w-full font-bold text-base gap-2 bg-emerald-600 hover:bg-emerald-700 select-none transform transition-transform active:scale-95"
           >
             <CheckCircle2 className="w-5 h-5" />
             <span>Finalizou Atendimento ({formatSecondsToStopwatch(elapsedServiceSeconds)})</span>

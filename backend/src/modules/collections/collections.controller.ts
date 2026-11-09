@@ -104,6 +104,15 @@ export class CollectionsController {
       next(error);
     }
   }
+
+  async getSyncState(req: Request, res: Response, next: NextFunction) {
+    try {
+      const data = await collectionsService.getSyncState(req.params.id, req.query.since as string | undefined);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const collectionsController = new CollectionsController();

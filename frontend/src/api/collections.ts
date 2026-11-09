@@ -149,4 +149,23 @@ export const collectionsApi = {
     const res = await apiRequest<{ success: boolean; data: { token: string; collectionId: string; title: string; status: CollectionStatus } }>(`/collections/${id}/remote-token`);
     return res.data;
   },
+
+  async getSyncState(id: string, since?: string): Promise<{
+    status: CollectionStatus;
+    targetDurationMinutes?: number | null;
+    startedAt?: string | null;
+    pausedAt?: string | null;
+    finishedAt?: string | null;
+    serverTime: string;
+    eventCounts: {
+      arrivals: number;
+      deliveriesByAttendant: Record<string, number>;
+    };
+    activeServices: any[];
+    recentEvents: any[];
+  }> {
+    const query = since ? `?since=${encodeURIComponent(since)}` : '';
+    const res = await apiRequest<{ success: boolean; data: any }>(`/collections/${id}/sync${query}`);
+    return res.data;
+  },
 };

@@ -26,5 +26,6 @@ router.post('/:id/finish', (req, res, next) => collectionsController.finish(req,
 router.post('/:id/reopen', validate(reopenCollectionSchema), (req, res, next) => collectionsController.reopen(req, res, next));
 router.delete('/:id', (req, res, next) => collectionsController.delete(req, res, next));
 router.get('/:id/remote-token', (req, res, next) => collectionsController.getRemoteToken(req, res, next));
+router.get('/:id/sync', (req, res, next) => collectionsController.getSyncState(req, res, next));
 
 export const collectionsRouter = router;

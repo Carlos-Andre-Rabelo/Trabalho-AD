@@ -147,11 +147,31 @@ export const RemoteOperationalPage: React.FC = () => {
     loadInitialData();
   }, [loadInitialData]);
 
+  const handleSyncState = useCallback((syncData: any) => {
+    if (syncData.eventCounts) {
+      setTotalArrivals((prev) => Math.max(prev, syncData.eventCounts.arrivals));
+      setDeliveriesByAttendant((prev) => {
+        const next = { ...prev };
+        for (const [k, v] of Object.entries(syncData.eventCounts.deliveriesByAttendant as Record<string, number>)) {
+          next[k] = Math.max(next[k] || 0, v);
+        }
+        return next;
+      });
+    }
+    if (syncData.activeServices && Array.isArray(syncData.activeServices)) {
+      setActiveServices(syncData.activeServices);
+    }
+    if (syncData.status) {
+      setCollection((prev) => (prev ? { ...prev, status: syncData.status } : prev));
+    }
+  }, []);
+
   const { isConnected } = useCollectionSync({
     collectionId: id,
     token,
     onEventCreated: applyEventCreated,
     onEventVoided: applyEventVoided,
+    onSyncState: handleSyncState,
     onStatusChanged: (updatedCol) => {
       setCollection((prev) => (prev ? { ...prev, status: updatedCol.status } : updatedCol));
     },
@@ -183,17 +203,31 @@ export const RemoteOperationalPage: React.FC = () => {
     }
   };
 
-  const handleRegisterArrival = async () => {
-    if (!id || !collection || collection.status !== 'IN_PROGRESS' || arrivalLockRef.current) return;
-    arrivalLockRef.current = true;
-    setIsArrivalPending(true);
+  const handleRegisterArrival = () => {
+    if (!id || !collection || collection.status !== 'IN_PROGRESS') return;
     triggerSensoryFeedback('arrival');
 
     const idempotencyKey = `mob-arr-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
     const nowIso = new Date().toISOString();
 
-    try {
-      const newEvent = await eventsApi.create(id, {
+    // 1. Atualização otimista imediata no celular (0ms delay)
+    setTotalArrivals((prev) => prev + 1);
+
+    const optimisticEvent: EventItem = {
+      id: idempotencyKey,
+      collectionId: id,
+      eventType: 'ARRIVAL',
+      occurredAt: nowIso,
+      recordedAt: nowIso,
+      idempotencyKey,
+      isVoided: false,
+    };
+    applyEventCreated(optimisticEvent);
+    setLastEventId(idempotencyKey);
+
+    // 2. Disparo assíncrono em background sem travar cliques subsequentes
+    eventsApi
+      .create(id, {
         eventType: 'ARRIVAL',
         idempotencyKey,
         occurredAt: nowIso,
@@ -202,64 +236,84 @@ export const RemoteOperationalPage: React.FC = () => {
           device: 'mobile',
           aferidor: aferidorLabel,
         },
+      })
+      .then((newEvent) => {
+        processedEventIds.current.add(newEvent.id);
+        setRecentEvents((prev) => prev.map((e) => (e.id === idempotencyKey ? newEvent : e)));
+        setLastEventId(newEvent.id);
+      })
+      .catch((err) => {
+        console.error('Falha ao registrar chegada:', err);
+        setTotalArrivals((prev) => Math.max(0, prev - 1));
+        setRecentEvents((prev) => prev.filter((e) => e.id !== idempotencyKey));
       });
-
-      applyEventCreated(newEvent);
-      setLastEventId(newEvent.id);
-    } catch (err) {
-      console.error('Falha ao registrar chegada:', err);
-    } finally {
-      arrivalLockRef.current = false;
-      setIsArrivalPending(false);
-    }
   };
 
-  const handleStartService = async (attendantId: string) => {
-    if (!id || !collection || collection.status !== 'IN_PROGRESS' || serviceLockRef.current[attendantId]) return;
-    serviceLockRef.current[attendantId] = true;
-    setPendingActionByAttendant((prev) => ({ ...prev, [attendantId]: true }));
+  const handleStartService = (attendantId: string) => {
+    if (!id || !collection || collection.status !== 'IN_PROGRESS') return;
     triggerSensoryFeedback('arrival');
 
-    try {
-      const interval = await servicesApi.startService(id, { attendantId });
-      setActiveServices((prev) => {
-        if (prev.some((s) => s.attendantId === attendantId)) return prev;
-        return [...prev, interval];
+    const tempIntervalId = `mob-srv-${Date.now()}`;
+    const optimisticInterval = {
+      id: tempIntervalId,
+      collectionId: id,
+      attendantId,
+      startedAt: new Date().toISOString(),
+    };
+
+    // 1. Atualização otimista imediata
+    setActiveServices((prev) => {
+      if (prev.some((s) => s.attendantId === attendantId)) return prev;
+      return [...prev, optimisticInterval];
+    });
+
+    // 2. Disparo assíncrono em background
+    servicesApi
+      .startService(id, { attendantId })
+      .then((realInterval) => {
+        setActiveServices((prev) =>
+          prev.map((s) => (s.id === tempIntervalId ? realInterval : s))
+        );
+      })
+      .catch((err) => {
+        console.error('Falha ao iniciar atendimento:', err);
+        setActiveServices((prev) => prev.filter((s) => s.id !== tempIntervalId));
       });
-    } catch (err) {
-      console.error('Falha ao iniciar atendimento:', err);
-    } finally {
-      serviceLockRef.current[attendantId] = false;
-      setPendingActionByAttendant((prev) => ({ ...prev, [attendantId]: false }));
-    }
   };
 
-  const handleFinishService = async (attendantId: string, serviceIntervalId?: string) => {
-    if (!id || !collection || collection.status !== 'IN_PROGRESS' || serviceLockRef.current[attendantId]) return;
-    serviceLockRef.current[attendantId] = true;
-    setPendingActionByAttendant((prev) => ({ ...prev, [attendantId]: true }));
+  const handleFinishService = (attendantId: string, serviceIntervalId?: string) => {
+    if (!id || !collection || collection.status !== 'IN_PROGRESS') return;
     triggerSensoryFeedback('delivery');
 
     const idempotencyKey = `mob-del-${attendantId}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
-    try {
-      const result = await servicesApi.finishService(id, {
-        attendantId,
-        serviceIntervalId,
-        idempotencyKey,
-      });
+    // 1. Atualização otimista imediata
+    setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
+    setDeliveriesByAttendant((prev) => ({
+      ...prev,
+      [attendantId]: (prev[attendantId] || 0) + 1,
+    }));
 
-      setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
-      if (result.event) {
-        applyEventCreated(result.event);
-        setLastEventId(result.event.id);
-      }
-    } catch (err) {
-      console.error('Falha ao finalizar atendimento:', err);
-    } finally {
-      serviceLockRef.current[attendantId] = false;
-      setPendingActionByAttendant((prev) => ({ ...prev, [attendantId]: false }));
-    }
+    // 2. Disparo assíncrono em background
+    servicesApi
+      .finishService(id, {
+        attendantId,
+        serviceIntervalId: serviceIntervalId?.startsWith('mob-') ? undefined : serviceIntervalId,
+        idempotencyKey,
+      })
+      .then((result) => {
+        if (result.event) {
+          applyEventCreated(result.event);
+          setLastEventId(result.event.id);
+        }
+      })
+      .catch((err) => {
+        console.error('Falha ao finalizar atendimento:', err);
+        setDeliveriesByAttendant((prev) => ({
+          ...prev,
+          [attendantId]: Math.max(0, (prev[attendantId] || 1) - 1),
+        }));
+      });
   };
 
   const handleUndoLastEvent = async () => {

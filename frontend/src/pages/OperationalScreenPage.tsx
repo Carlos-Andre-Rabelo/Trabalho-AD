@@ -68,10 +68,30 @@ export const OperationalScreenPage: React.FC = () => {
     }
   }, []);
 
+  const handleSyncState = useCallback((syncData: any) => {
+    if (syncData.eventCounts) {
+      setTotalArrivals((prev) => Math.max(prev, syncData.eventCounts.arrivals));
+      setDeliveriesByAttendant((prev) => {
+        const next = { ...prev };
+        for (const [k, v] of Object.entries(syncData.eventCounts.deliveriesByAttendant as Record<string, number>)) {
+          next[k] = Math.max(next[k] || 0, v);
+        }
+        return next;
+      });
+    }
+    if (syncData.activeServices && Array.isArray(syncData.activeServices)) {
+      setActiveServices(syncData.activeServices);
+    }
+    if (syncData.status) {
+      setCollection((prev) => (prev ? { ...prev, status: syncData.status } : prev));
+    }
+  }, []);
+
   const { connectedClients } = useCollectionSync({
     collectionId: id,
     onEventCreated: applyEventCreated,
     onEventVoided: applyEventVoided,
+    onSyncState: handleSyncState,
     onStatusChanged: (col) => {
       setCollection((prev) => (prev ? { ...prev, status: col.status } : col));
     },
@@ -199,10 +219,25 @@ export const OperationalScreenPage: React.FC = () => {
     }
   };
 
-  const handleRegisterArrival = async (queueId?: string) => {
+  const handleRegisterArrival = (queueId?: string) => {
     if (!id) return;
     const idempotencyKey = `arr-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const nowIso = new Date().toISOString();
+
+    // 1. Atualização otimista imediata (0ms)
+    setTotalArrivals((prev) => prev + 1);
+
+    const optimisticEvent: EventItem = {
+      id: idempotencyKey,
+      collectionId: id,
+      eventType: 'ARRIVAL',
+      queueId,
+      occurredAt: nowIso,
+      recordedAt: nowIso,
+      idempotencyKey,
+      isVoided: false,
+    };
+    applyEventCreated(optimisticEvent);
 
     if (!isOnline) {
       enqueueOfflineEvent({
@@ -212,54 +247,90 @@ export const OperationalScreenPage: React.FC = () => {
         queueId,
         occurredAt: nowIso,
       });
-      setTotalArrivals((prev) => prev + 1);
       return;
     }
 
-    try {
-      const newEvent = await eventsApi.create(id, {
+    // 2. Disparo assíncrono em background
+    eventsApi
+      .create(id, {
         eventType: 'ARRIVAL',
         queueId,
         idempotencyKey,
         occurredAt: nowIso,
+      })
+      .then((newEvent) => {
+        processedEventIds.current.add(newEvent.id);
+        setRecentEvents((prev) => prev.map((e) => (e.id === idempotencyKey ? newEvent : e)));
+      })
+      .catch((e) => {
+        console.error('Falha ao registrar chegada:', e);
+        setTotalArrivals((prev) => Math.max(0, prev - 1));
+        setRecentEvents((prev) => prev.filter((e) => e.id !== idempotencyKey));
       });
-      applyEventCreated(newEvent);
-    } catch (e) {
-      console.error('Falha ao registrar chegada:', e);
-    }
   };
 
   const handleStartService = async (attendantId: string) => {
     if (!id) return;
-    try {
-      const interval = await servicesApi.startService(id, { attendantId });
-      setActiveServices((prev) => {
-        if (prev.some((s) => s.attendantId === attendantId)) return prev;
-        return [...prev, interval];
+    const tempIntervalId = `opt-srv-${Date.now()}`;
+    const optimisticInterval = {
+      id: tempIntervalId,
+      collectionId: id,
+      attendantId,
+      startedAt: new Date().toISOString(),
+    };
+
+    // 1. Atualização otimista imediata
+    setActiveServices((prev) => {
+      if (prev.some((s) => s.attendantId === attendantId)) return prev;
+      return [...prev, optimisticInterval];
+    });
+
+    // 2. Disparo assíncrono em background
+    servicesApi
+      .startService(id, { attendantId })
+      .then((realInterval) => {
+        setActiveServices((prev) =>
+          prev.map((s) => (s.id === tempIntervalId ? realInterval : s))
+        );
+      })
+      .catch((e: any) => {
+        console.error('Falha ao iniciar atendimento:', e);
+        setActiveServices((prev) => prev.filter((s) => s.id !== tempIntervalId));
+        alert(e?.message || 'Falha ao iniciar atendimento.');
       });
-    } catch (e: any) {
-      alert(e?.message || 'Falha ao iniciar atendimento.');
-    }
   };
 
   const handleFinishService = async (attendantId: string, serviceId?: string) => {
     if (!id) return;
     const idempotencyKey = `del-${attendantId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
-    try {
-      const result = await servicesApi.finishService(id, {
-        attendantId,
-        serviceIntervalId: serviceId,
-        idempotencyKey,
-      });
+    // 1. Atualização otimista imediata
+    setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
+    setDeliveriesByAttendant((prev) => ({
+      ...prev,
+      [attendantId]: (prev[attendantId] || 0) + 1,
+    }));
 
-      setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
-      if (result.event) {
-        applyEventCreated(result.event);
-      }
-    } catch (e: any) {
-      alert(e?.message || 'Falha ao concluir atendimento.');
-    }
+    // 2. Disparo assíncrono em background
+    servicesApi
+      .finishService(id, {
+        attendantId,
+        serviceIntervalId: serviceId?.startsWith('opt-') ? undefined : serviceId,
+        idempotencyKey,
+      })
+      .then((result) => {
+        if (result.event) {
+          applyEventCreated(result.event);
+        }
+      })
+      .catch((e: any) => {
+        console.error('Falha ao concluir atendimento:', e);
+        setDeliveriesByAttendant((prev) => ({
+          ...prev,
+          [attendantId]: Math.max(0, (prev[attendantId] || 1) - 1),
+        }));
+        alert(e?.message || 'Falha ao concluir atendimento.');
+      });
   };
 
   const handleVoidEvent = async (eventId: string, reason: string) => {

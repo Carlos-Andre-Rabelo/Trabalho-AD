@@ -620,6 +620,79 @@ export class CollectionsService {
       return deleted;
     });
   }
+
+  async getSyncState(collectionId: string, since?: string) {
+    const sinceDate = since ? new Date(since) : new Date(Date.now() - 30000);
+
+    const [collection, activeServices, recentEvents, grouped] = await Promise.all([
+      prisma.collection.findUnique({
+        where: { id: collectionId },
+        select: {
+          id: true,
+          status: true,
+          startedAt: true,
+          endedAt: true,
+          notes: true,
+          pauses: {
+            where: { endedAt: null },
+            take: 1,
+            orderBy: { startedAt: 'desc' },
+          },
+        },
+      }),
+      prisma.serviceInterval.findMany({
+        where: { collectionId, endedAt: null },
+        include: { attendant: true },
+        orderBy: { startedAt: 'asc' },
+      }),
+      prisma.event.findMany({
+        where: {
+          collectionId,
+          ...(isNaN(sinceDate.getTime()) ? {} : { recordedAt: { gte: sinceDate } }),
+        },
+        orderBy: { recordedAt: 'desc' },
+        take: 30,
+        include: { attendant: true, queue: true },
+      }),
+      prisma.event.groupBy({
+        by: ['eventType', 'attendantId'],
+        where: { collectionId, isVoided: false },
+        _count: { _all: true },
+      }),
+    ]);
+
+    if (!collection) {
+      throw new AppError('Coleta não encontrada.', 404, 'NOT_FOUND');
+    }
+
+    let arrivals = 0;
+    const deliveriesByAttendant: Record<string, number> = {};
+    for (const g of grouped) {
+      if (g.eventType === 'ARRIVAL') {
+        arrivals += g._count._all;
+      } else if (g.eventType === 'DELIVERY' && g.attendantId) {
+        deliveriesByAttendant[g.attendantId] = (deliveriesByAttendant[g.attendantId] || 0) + g._count._all;
+      }
+    }
+
+    const { targetDurationMinutes } = parseCollectionNotes(collection.notes);
+    const activePause = collection.pauses?.[0];
+
+    return {
+      status: collection.status,
+      targetDurationMinutes,
+      startedAt: collection.startedAt,
+      pausedAt: activePause ? activePause.startedAt : null,
+      finishedAt: collection.endedAt,
+      serverTime: new Date().toISOString(),
+      eventCounts: {
+        arrivals,
+        deliveriesByAttendant,
+      },
+      activeServices,
+      recentEvents,
+    };
+  }
 }
 
 export const collectionsService = new CollectionsService();

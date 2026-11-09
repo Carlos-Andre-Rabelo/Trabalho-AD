@@ -1,5 +1,21 @@
 import { useEffect, useState, useRef } from 'react';
 import { API_BASE_URL } from '../api/client.js';
+import { collectionsApi } from '../api/collections.js';
+
+export interface SyncStateData {
+  status: string;
+  targetDurationMinutes?: number | null;
+  startedAt?: string | null;
+  pausedAt?: string | null;
+  finishedAt?: string | null;
+  serverTime: string;
+  eventCounts: {
+    arrivals: number;
+    deliveriesByAttendant: Record<string, number>;
+  };
+  activeServices: any[];
+  recentEvents: any[];
+}
 
 export interface UseCollectionSyncOptions {
   collectionId?: string;
@@ -11,6 +27,7 @@ export interface UseCollectionSyncOptions {
   onServiceStarted?: (interval: any) => void;
   onServiceFinished?: (data: { interval: any; event: any }) => void;
   onServiceCancelled?: (data: { attendantId: string }) => void;
+  onSyncState?: (data: SyncStateData) => void;
 }
 
 export function useCollectionSync({
@@ -23,12 +40,13 @@ export function useCollectionSync({
   onServiceStarted,
   onServiceFinished,
   onServiceCancelled,
+  onSyncState,
 }: UseCollectionSyncOptions) {
   const [isConnected, setIsConnected] = useState(false);
   const [connectedClients, setConnectedClients] = useState(1);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
 
-  // Armazena callbacks em refs para evitar reconectar o EventSource a cada render
+  // Armazena callbacks em refs para evitar reconectar o EventSource ou reiniciar polling
   const callbacksRef = useRef({
     onEventCreated,
     onEventVoided,
@@ -37,6 +55,7 @@ export function useCollectionSync({
     onServiceStarted,
     onServiceFinished,
     onServiceCancelled,
+    onSyncState,
   });
 
   useEffect(() => {
@@ -48,27 +67,32 @@ export function useCollectionSync({
       onServiceStarted,
       onServiceFinished,
       onServiceCancelled,
+      onSyncState,
     };
   });
 
   useEffect(() => {
     if (!collectionId) return;
+    const activeCollectionId: string = collectionId;
 
     const activeToken = token || localStorage.getItem('ru_metrics_token');
     if (!activeToken) return;
 
     let eventSource: EventSource | null = null;
     let reconnectTimeout: any = null;
+    let pollTimer: any = null;
     let isUnmounted = false;
+    let lastPollTimestamp = new Date(Date.now() - 30000).toISOString();
 
-    function connect() {
+    // 1. Conexão SSE para ambientes com streaming contínuo
+    function connectSSE() {
       if (isUnmounted) return;
 
       const base = API_BASE_URL.startsWith('http')
         ? API_BASE_URL
         : `${window.location.origin}${API_BASE_URL.startsWith('/') ? '' : '/'}${API_BASE_URL}`;
 
-      const streamUrl = `${base}/collections/${collectionId}/events/stream?token=${encodeURIComponent(activeToken as string)}`;
+      const streamUrl = `${base}/collections/${activeCollectionId}/events/stream?token=${encodeURIComponent(activeToken as string)}`;
 
       try {
         eventSource = new EventSource(streamUrl);
@@ -180,22 +204,65 @@ export function useCollectionSync({
               eventSource.close();
               eventSource = null;
             }
-            // Tenta reconectar após 4s
-            reconnectTimeout = setTimeout(connect, 4000);
+            reconnectTimeout = setTimeout(connectSSE, 4000);
           }
         };
       } catch (err) {
         console.error('Falha ao iniciar EventSource:', err);
         setIsConnected(false);
-        reconnectTimeout = setTimeout(connect, 5000);
+        reconnectTimeout = setTimeout(connectSSE, 5000);
       }
     }
 
-    connect();
+    // 2. Polling inteligente de alta frequência (a cada 1200ms)
+    // Garante sincronização bidirecional em tempo real perfeita mesmo em plataformas Serverless (como Vercel)
+    async function pollSync() {
+      if (isUnmounted) return;
+      try {
+        const syncData = await collectionsApi.getSyncState(activeCollectionId, lastPollTimestamp);
+        if (isUnmounted) return;
+
+        setIsConnected(true);
+        setLastSyncTime(new Date());
+        lastPollTimestamp = syncData.serverTime || new Date().toISOString();
+
+        // Dispara o callback estruturado global
+        callbacksRef.current.onSyncState?.(syncData);
+
+        // Dispara eventos novos recebidos de outros dispositivos
+        if (syncData.recentEvents && syncData.recentEvents.length > 0) {
+          for (const ev of syncData.recentEvents) {
+            if (ev.isVoided) {
+              callbacksRef.current.onEventVoided?.(ev);
+            } else {
+              callbacksRef.current.onEventCreated?.(ev);
+            }
+          }
+        }
+
+        // Atualiza status se mudou
+        if (syncData.status) {
+          callbacksRef.current.onStatusChanged?.({
+            status: syncData.status,
+            targetDurationMinutes: syncData.targetDurationMinutes,
+          });
+        }
+      } catch (err) {
+        // Silencioso em caso de micro-falhas transitórias de rede
+      } finally {
+        if (!isUnmounted) {
+          pollTimer = setTimeout(pollSync, 1200);
+        }
+      }
+    }
+
+    connectSSE();
+    pollTimer = setTimeout(pollSync, 600);
 
     return () => {
       isUnmounted = true;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (pollTimer) clearTimeout(pollTimer);
       if (eventSource) {
         eventSource.close();
         eventSource = null;
