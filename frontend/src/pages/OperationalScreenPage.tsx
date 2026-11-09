@@ -19,6 +19,17 @@ export const OperationalScreenPage: React.FC = () => {
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [openDurationSignal, setOpenDurationSignal] = useState(0);
   const [isQrModalOpen, setIsQrModalOpen] = useState(false);
+  const [selectedFocus, setSelectedFocus] = useState<string>(() => {
+    if (!id || typeof window === 'undefined') return 'all';
+    return localStorage.getItem(`ru_web_focus_${id}`) || 'all';
+  });
+
+  const handleFocusChange = (newFocus: string) => {
+    setSelectedFocus(newFocus);
+    if (id && typeof window !== 'undefined') {
+      localStorage.setItem(`ru_web_focus_${id}`, newFocus);
+    }
+  };
 
   const autoFinishRedirectTimerRef = useRef<any>(null);
 
@@ -241,33 +252,142 @@ export const OperationalScreenPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Botão de Chegada Instantâneo */}
-      <ArrivalButton
-        totalArrivals={totalArrivals}
-        onRegisterArrival={(queueId) => registerArrival(queueId)}
-        isCollectionActive={isCollectionActive}
-        queues={collection.queues}
-      />
+      {/* Seletor de Abas de Aferição Específica (Foco: Todos / Chegadas / Por Atendente) */}
+      <div className="bg-white p-2 rounded-lg border border-slate-200 flex items-center gap-1.5 overflow-x-auto text-xs shadow-sm">
+        <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-1 shrink-0">
+          Aferir:
+        </span>
 
-      {/* Cartões dos Atendentes com Estados Derivados Estáveis */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <button
+          type="button"
+          onClick={() => handleFocusChange('all')}
+          className={`px-3 py-1.5 rounded-md font-semibold transition-all whitespace-nowrap flex items-center gap-1.5 ${
+            selectedFocus === 'all'
+              ? 'bg-slate-900 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <span>Todos</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleFocusChange('arrivals')}
+          className={`px-3 py-1.5 rounded-md font-semibold transition-all whitespace-nowrap flex items-center gap-1.5 ${
+            selectedFocus === 'arrivals'
+              ? 'bg-blue-600 text-white shadow-sm'
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full ${selectedFocus === 'arrivals' ? 'bg-white' : 'bg-blue-500'}`} />
+          <span>Chegadas</span>
+          <span
+            className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold ${
+              selectedFocus === 'arrivals' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-700'
+            }`}
+          >
+            {totalArrivals}
+          </span>
+        </button>
+
         {collection.attendants.map((att) => {
-          const activeForAtt = activeServicesByAttendant[att.id];
           const count = deliveriesByAttendant[att.id] || 0;
+          const isBusy = !!activeServicesByAttendant[att.id];
+          const isSelected = selectedFocus === att.id;
 
           return (
-            <AttendantCard
+            <button
               key={att.id}
-              attendant={att}
-              deliveriesCount={count}
-              activeService={activeForAtt}
-              onStartService={startService}
-              onFinishService={finishService}
-              isCollectionActive={isCollectionActive}
-            />
+              type="button"
+              onClick={() => handleFocusChange(att.id)}
+              className={`px-3 py-1.5 rounded-md font-semibold transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                isSelected
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isBusy
+                    ? 'bg-amber-400 animate-pulse'
+                    : isSelected
+                    ? 'bg-white'
+                    : 'bg-emerald-500'
+                }`}
+              />
+              <span>{att.displayName}</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold ${
+                  isSelected ? 'bg-emerald-700 text-white' : 'bg-slate-100 text-slate-700'
+                }`}
+              >
+                {count}
+              </span>
+            </button>
           );
         })}
       </div>
+
+      {/* Banner Informativo quando um foco específico estiver ativo */}
+      {selectedFocus !== 'all' && (
+        <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+          <div className="flex items-center gap-1.5 font-medium">
+            <span>Modo de Aferição Específica:</span>
+            <strong className="text-slate-900">
+              {selectedFocus === 'arrivals'
+                ? 'Apenas Chegadas'
+                : collection.attendants.find((a) => a.id === selectedFocus)?.displayName || 'Atendente Selecionado'}
+            </strong>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleFocusChange('all')}
+            className="text-blue-600 hover:text-blue-800 font-semibold underline text-[11px]"
+          >
+            Ver todos os botões
+          </button>
+        </div>
+      )}
+
+      {/* Botão de Chegada Instantâneo (exibido apenas em 'all' ou 'arrivals') */}
+      {(selectedFocus === 'all' || selectedFocus === 'arrivals') && (
+        <ArrivalButton
+          totalArrivals={totalArrivals}
+          onRegisterArrival={(queueId) => registerArrival(queueId)}
+          isCollectionActive={isCollectionActive}
+          queues={collection.queues}
+        />
+      )}
+
+      {/* Cartões dos Atendentes (exibidos em 'all' ou filtrados para o atendente específico) */}
+      {selectedFocus !== 'arrivals' && (
+        <div
+          className={
+            selectedFocus === 'all'
+              ? 'grid grid-cols-1 md:grid-cols-2 gap-3'
+              : 'max-w-2xl mx-auto w-full'
+          }
+        >
+          {collection.attendants
+            .filter((att) => selectedFocus === 'all' || selectedFocus === att.id)
+            .map((att) => {
+              const activeForAtt = activeServicesByAttendant[att.id];
+              const count = deliveriesByAttendant[att.id] || 0;
+
+              return (
+                <AttendantCard
+                  key={att.id}
+                  attendant={att}
+                  deliveriesCount={count}
+                  activeService={activeForAtt}
+                  onStartService={startService}
+                  onFinishService={finishService}
+                  isCollectionActive={isCollectionActive}
+                />
+              );
+            })}
+        </div>
+      )}
 
       {/* Mini Log com Status "Registrando..." e Transição Permanente Sem Duplicação */}
       <EventLogQuickView
