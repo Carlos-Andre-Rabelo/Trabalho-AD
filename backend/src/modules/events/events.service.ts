@@ -3,12 +3,13 @@ import { AppError } from '../../middleware/errorHandler.js';
 import { recordAuditLog } from '../audit/audit.service.js';
 import { CreateEventInput, VoidEventInput } from './events.schema.js';
 import { CollectionStatus, EventType } from '@prisma/client';
+import { sseManager } from './events.sse.js';
 
 export class EventsService {
   async createEvent(userId: string, collectionId: string, input: CreateEventInput) {
     // 1. Verificar Coleta e Status
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -67,6 +68,8 @@ export class EventsService {
       },
     });
 
+    sseManager.broadcast(collectionId, 'event:created', event);
+
     return { event, isReplay: false };
   }
 
@@ -78,10 +81,6 @@ export class EventsService {
 
     if (!event) {
       throw new AppError('Evento não encontrado para esta coleta.', 404, 'EVENT_NOT_FOUND');
-    }
-
-    if (event.collection.ownerId !== userId) {
-      throw new AppError('Você não tem permissão para anular este evento.', 403, 'FORBIDDEN');
     }
 
     if (event.isVoided) {
@@ -110,6 +109,8 @@ export class EventsService {
       newValues: { isVoided: true, voidReason: input.voidReason, voidedAt: now },
     });
 
+    sseManager.broadcast(collectionId, 'event:voided', updated);
+
     return updated;
   }
 
@@ -126,7 +127,7 @@ export class EventsService {
   ) {
     // Validar acesso à coleta
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -168,9 +169,9 @@ export class EventsService {
     };
   }
 
-  async getRecentEvents(userId: string, collectionId: string, limit = 10) {
+  async getRecentEvents(_userId: string, collectionId: string, limit = 10) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {

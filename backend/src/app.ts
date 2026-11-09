@@ -15,6 +15,7 @@ import { proteinRouter } from './modules/protein/protein.routes.js';
 import { metricsRouter } from './modules/metrics/metrics.routes.js';
 import { metricsController } from './modules/metrics/metrics.controller.js';
 import { authMiddleware } from './middleware/auth.js';
+import { getNetworkInfo } from './modules/network/network.service.js';
 
 export function createApp() {
   const app = express();
@@ -24,14 +25,21 @@ export function createApp() {
   app.use(
     cors({
       origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+        if (
+          !origin ||
+          allowedOrigins.includes(origin) ||
+          allowedOrigins.includes('*') ||
+          origin.endsWith('.vercel.app') ||
+          origin.includes('localhost') ||
+          origin.includes('127.0.0.1')
+        ) {
           callback(null, true);
         } else {
-          callback(null, true); // Permissivo em dev acadêmico
+          callback(null, true); // Permissivo em dev/academico
         }
       },
       credentials: true,
-      allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Requested-With'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Requested-With', 'X-User-Name'],
     })
   );
 
@@ -53,6 +61,11 @@ export function createApp() {
       (req as any).cookies = {};
     }
     next();
+  });
+
+  // Informações de rede local para conexão de dispositivos móveis
+  app.get('/api/network-info', (_req, res) => {
+    res.json({ success: true, data: getNetworkInfo() });
   });
 
   // Healthcheck

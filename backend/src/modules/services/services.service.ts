@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { CollectionStatus, EventType, ServiceIntervalStatus, MeasurementMethod } from '@prisma/client';
+import { sseManager } from '../events/events.sse.js';
 
 export interface StartServiceInput {
   attendantId: string;
@@ -19,7 +20,7 @@ export interface FinishServiceInput {
 export class ServicesService {
   async startService(userId: string, collectionId: string, input: StartServiceInput) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -40,7 +41,7 @@ export class ServicesService {
     });
 
     if (active) {
-      throw new AppError('Este atendente já possui um atendimento cronometrado em andamento. Conclua-o antes de iniciar outro.', 409);
+      throw new AppError('Este atendente já possui um atendimento em andamento. Conclua-o antes de iniciar outro.', 409);
     }
 
     const now = new Date();
@@ -55,12 +56,14 @@ export class ServicesService {
       include: { attendant: true },
     });
 
+    sseManager.broadcast(collectionId, 'service:started', interval);
+
     return interval;
   }
 
   async finishService(userId: string, collectionId: string, input: FinishServiceInput) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -80,7 +83,7 @@ export class ServicesService {
       return { event: existingEvent, isReplay: true };
     }
 
-    return await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // Localizar o intervalo ativo
       let interval = null;
       if (input.serviceIntervalId) {
@@ -99,11 +102,13 @@ export class ServicesService {
       }
 
       if (!interval) {
-        throw new AppError('Nenhum atendimento cronometrado em andamento para este atendente.', 404);
+        throw new AppError('Nenhum atendimento em andamento para este atendente.', 404);
       }
 
       const now = new Date();
-      const durationMs = Math.max(0, now.getTime() - new Date(interval.startedAt).getTime());
+      const startedAt = new Date(interval.startedAt);
+      const durationMs = Math.max(0, now.getTime() - startedAt.getTime());
+      const durationSeconds = Math.round(durationMs / 1000);
 
       // 1. Concluir o intervalo
       const updatedInterval = await tx.serviceInterval.update({
@@ -128,8 +133,10 @@ export class ServicesService {
           idempotencyKey: input.idempotencyKey,
           metadata: {
             serviceIntervalId: updatedInterval.id,
+            startedAt: startedAt.toISOString(),
+            endedAt: now.toISOString(),
             durationMs,
-            durationSeconds: Math.round(durationMs / 1000),
+            durationSeconds,
             isTimed: true,
           },
         },
@@ -158,11 +165,21 @@ export class ServicesService {
         isReplay: false,
       };
     });
+
+    if (!result.isReplay && result.event) {
+      sseManager.broadcast(collectionId, 'event:created', result.event);
+      sseManager.broadcast(collectionId, 'service:finished', {
+        interval: result.interval,
+        event: result.event,
+      });
+    }
+
+    return result;
   }
 
   async cancelActiveService(userId: string, collectionId: string, attendantId: string) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -189,12 +206,14 @@ export class ServicesService {
       },
     });
 
+    sseManager.broadcast(collectionId, 'service:cancelled', { attendantId });
+
     return cancelled;
   }
 
-  async getActiveServices(userId: string, collectionId: string) {
+  async getActiveServices(_userId: string, collectionId: string) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {

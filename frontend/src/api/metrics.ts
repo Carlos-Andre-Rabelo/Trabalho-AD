@@ -1,4 +1,4 @@
-import { apiRequest } from './client.js';
+import { apiRequest, API_BASE_URL } from './client.js';
 
 export interface CollectionMetricsResponse {
   collection: {
@@ -10,6 +10,13 @@ export interface CollectionMetricsResponse {
     endedAt: string | null;
     location: string | null;
     timezone: string;
+    targetDurationMinutes?: number | null;
+    notes?: string | null;
+    owner?: {
+      id: string;
+      name: string;
+      email?: string;
+    };
   };
   metrics: {
     timeMetrics: {
@@ -110,10 +117,22 @@ export const metricsApi = {
   },
 
   getRawCsvUrl(collectionId: string) {
-    return `/api/collections/${collectionId}/export/raw.csv`;
+    const base = API_BASE_URL.startsWith('http') ? API_BASE_URL : API_BASE_URL.startsWith('/') ? API_BASE_URL : `/${API_BASE_URL}`;
+    return `${base}/collections/${collectionId}/export/raw.csv`;
   },
 
   getAggregatedCsvUrl(collectionId: string) {
-    return `/api/collections/${collectionId}/export/aggregated.csv`;
+    const base = API_BASE_URL.startsWith('http') ? API_BASE_URL : API_BASE_URL.startsWith('/') ? API_BASE_URL : `/${API_BASE_URL}`;
+    return `${base}/collections/${collectionId}/export/aggregated.csv`;
+  },
+
+  getExcelUrl(collectionId: string) {
+    const base = API_BASE_URL.startsWith('http') ? API_BASE_URL : API_BASE_URL.startsWith('/') ? API_BASE_URL : `/${API_BASE_URL}`;
+    return `${base}/collections/${collectionId}/export/excel`;
+  },
+
+  getCompleteCsvUrl(collectionId: string) {
+    const base = API_BASE_URL.startsWith('http') ? API_BASE_URL : API_BASE_URL.startsWith('/') ? API_BASE_URL : `/${API_BASE_URL}`;
+    return `${base}/collections/${collectionId}/export/complete.csv`;
   },
 };

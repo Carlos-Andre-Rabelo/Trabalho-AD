@@ -72,3 +72,69 @@ export function triggerHaptic(durationMs = 40) {
     } catch (e) {}
   }
 }
+
+/**
+ * Alarme sonoro que toca quando o cronômetro da aferição atinge zero.
+ * Toca uma sequência trifásica harmoniosa e audível de 3 bipes distintos.
+ */
+export function playTimerEndAlert() {
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+
+    const notes = [
+      { freq: 523.25, time: 0.0, dur: 0.15 }, // C5
+      { freq: 659.25, time: 0.18, dur: 0.15 }, // E5
+      { freq: 783.99, time: 0.36, dur: 0.15 }, // G5
+      { freq: 1046.5, time: 0.54, dur: 0.4 },  // C6
+    ];
+
+    notes.forEach(({ freq, time, dur }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + time);
+
+      gain.gain.setValueAtTime(0.2, ctx.currentTime + time);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + time + dur);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(ctx.currentTime + time);
+      osc.stop(ctx.currentTime + time + dur);
+    });
+
+    triggerHaptic(200);
+  } catch (e) {}
+}
+
+/**
+ * Bipe sutil de aviso (ex: último minuto de aferição).
+ */
+export function playTimerWarningBeep() {
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(740, ctx.currentTime);
+    gain.gain.setValueAtTime(0.1, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start();
+    osc.stop(ctx.currentTime + 0.15);
+  } catch (e) {}
+}

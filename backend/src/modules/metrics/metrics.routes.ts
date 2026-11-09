@@ -10,5 +10,7 @@ router.get('/metrics', (req, res, next) => metricsController.getMetrics(req, res
 router.get('/timeline', (req, res, next) => metricsController.getTimeline(req, res, next));
 router.get('/export/raw.csv', (req, res, next) => metricsController.exportRawCsv(req, res, next));
 router.get('/export/aggregated.csv', (req, res, next) => metricsController.exportAggregatedCsv(req, res, next));
+router.get('/export/excel', (req, res, next) => metricsController.exportExcel(req, res, next));
+router.get('/export/complete.csv', (req, res, next) => metricsController.exportCompleteCsv(req, res, next));
 
 export const metricsRouter = router;

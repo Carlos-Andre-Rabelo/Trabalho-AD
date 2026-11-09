@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { metricsApi, CollectionMetricsResponse } from '../api/metrics.js';
 import { Button } from '../components/common/Button.js';
 import { formatDateTime, formatDate, formatSecondsToStopwatch } from '../utils/formatters.js';
-import { Printer, Download, ArrowLeft } from 'lucide-react';
+import { Printer, Download, ArrowLeft, FileSpreadsheet } from 'lucide-react';
 
 export const ReportsPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -50,6 +50,16 @@ export const ReportsPage: React.FC = () => {
             <Printer className="w-4 h-4" /> Imprimir / Salvar PDF
           </Button>
 
+          <a href={metricsApi.getExcelUrl(id!)} download>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2 font-bold text-emerald-800 bg-emerald-50 border-emerald-300 hover:bg-emerald-100"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-emerald-700" /> Exportar Excel (.xlsx)
+            </Button>
+          </a>
+
           <a href={metricsApi.getAggregatedCsvUrl(id!)} download>
             <Button variant="outline" size="sm" className="gap-2">
               <Download className="w-4 h-4" /> Exportar CSV
@@ -77,7 +87,11 @@ export const ReportsPage: React.FC = () => {
         </div>
 
         {/* Metadados da Sessão */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs bg-slate-50 p-4 rounded-xl border border-slate-200">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-xs bg-slate-50 p-4 rounded-xl border border-slate-200">
+          <div>
+            <span className="text-slate-400 font-medium uppercase">Aferidor Responsável</span>
+            <div className="font-bold text-blue-950 mt-0.5">{collection.owner?.name || 'Aferidor'}</div>
+          </div>
           <div>
             <span className="text-slate-400 font-medium uppercase">Título</span>
             <div className="font-bold text-slate-900 mt-0.5">{collection.title}</div>

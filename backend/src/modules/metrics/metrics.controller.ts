@@ -51,6 +51,37 @@ export class MetricsController {
       next(error);
     }
   }
+
+  async exportExcel(req: Request, res: Response, next: NextFunction) {
+    try {
+      const buffer = await metricsService.exportExcel(req.user!.id, req.params.collectionId);
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="coleta-${req.params.collectionId}-relatorio-completo.xlsx"`
+      );
+      return res.status(200).send(buffer);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async exportCompleteCsv(req: Request, res: Response, next: NextFunction) {
+    try {
+      const csv = await metricsService.exportCompleteCsv(req.user!.id, req.params.collectionId);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="coleta-${req.params.collectionId}-relatorio-completo.csv"`
+      );
+      return res.status(200).send('\uFEFF' + csv);
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const metricsController = new MetricsController();

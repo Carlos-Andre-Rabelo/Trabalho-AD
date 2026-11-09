@@ -37,3 +37,4 @@ backend/prisma/*.db-journal
 Thumbs.db
 
 pgdata.img
+.neon

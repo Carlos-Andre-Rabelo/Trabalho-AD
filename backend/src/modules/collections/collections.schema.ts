@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const createCollectionSchema = z.object({
   body: z.object({
     title: z.string().min(3, 'O título deve ter no mínimo 3 caracteres').max(150),
+    aferidorName: z.string().min(2, 'O nome do aferidor deve ter no mínimo 2 caracteres').max(100).optional(),
     description: z.string().max(500).optional(),
     location: z.string().max(100).optional(),
     timezone: z.string().default('America/Sao_Paulo'),
@@ -20,6 +21,7 @@ export const createCollectionSchema = z.object({
         { code: 'B', displayName: 'Atendente B' },
       ]),
     queues: z.array(z.string().min(1).max(50)).optional(),
+    targetDurationMinutes: z.number().int().positive().nullable().optional(),
     notes: z.string().max(1000).optional(),
   }),
 });
@@ -29,6 +31,7 @@ export const updateCollectionSchema = z.object({
     title: z.string().min(3).max(150).optional(),
     description: z.string().max(500).optional(),
     location: z.string().max(100).optional(),
+    targetDurationMinutes: z.number().int().positive().nullable().optional(),
     notes: z.string().max(1000).optional(),
   }),
 });

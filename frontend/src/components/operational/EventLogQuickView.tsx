@@ -1,9 +1,7 @@
 import React, { useState } from 'react';
 import { EventItem } from '../../api/events.js';
 import { formatTime } from '../../utils/formatters.js';
-import { Undo2, AlertTriangle } from 'lucide-react';
-import { Modal } from '../common/Modal.js';
-import { Button } from '../common/Button.js';
+import { Undo2 } from 'lucide-react';
 
 interface EventLogQuickViewProps {
   events: EventItem[];
@@ -11,140 +9,175 @@ interface EventLogQuickViewProps {
   isCollectionActive: boolean;
 }
 
+export function getServiceTimes(event: EventItem) {
+  const endTime = new Date(event.occurredAt);
+  let startTime = endTime;
+  let durationSeconds = 0;
+
+  if (event.metadata?.startedAt) {
+    startTime = new Date(event.metadata.startedAt);
+  } else if (event.metadata?.durationSeconds !== undefined) {
+    durationSeconds = event.metadata.durationSeconds;
+    startTime = new Date(endTime.getTime() - durationSeconds * 1000);
+  } else if (event.metadata?.durationMs !== undefined) {
+    durationSeconds = Math.round(event.metadata.durationMs / 1000);
+    startTime = new Date(endTime.getTime() - event.metadata.durationMs);
+  }
+
+  if (event.metadata?.durationSeconds !== undefined) {
+    durationSeconds = event.metadata.durationSeconds;
+  } else if (event.metadata?.durationMs !== undefined) {
+    durationSeconds = Math.round(event.metadata.durationMs / 1000);
+  } else {
+    durationSeconds = Math.max(0, Math.round((endTime.getTime() - startTime.getTime()) / 1000));
+  }
+
+  const formatExactTime = (d: Date) => {
+    return isNaN(d.getTime())
+      ? '—'
+      : d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  return {
+    startTimeStr: formatExactTime(startTime),
+    endTimeStr: formatExactTime(endTime),
+    durationSeconds,
+  };
+}
+
 export const EventLogQuickView: React.FC<EventLogQuickViewProps> = ({
   events,
   onVoidEvent,
   isCollectionActive,
 }) => {
-  const [selectedEventToVoid, setSelectedEventToVoid] = useState<EventItem | null>(null);
-  const [voidReason, setVoidReason] = useState('');
-  const [isVoiding, setIsVoiding] = useState(false);
+  const [voidingId, setVoidingId] = useState<string | null>(null);
 
-  const handleConfirmVoid = async () => {
-    if (!selectedEventToVoid || !voidReason.trim()) return;
-    setIsVoiding(true);
+  const handleQuickVoid = async (eventId: string) => {
+    if (voidingId) return;
+    setVoidingId(eventId);
     try {
-      await onVoidEvent(selectedEventToVoid.id, voidReason.trim());
-      setSelectedEventToVoid(null);
-      setVoidReason('');
+      await onVoidEvent(eventId, 'Desfeito pelo aferidor');
     } finally {
-      setIsVoiding(false);
+      setVoidingId(null);
     }
   };
 
+  if (events.length === 0) return null;
+
   return (
-    <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-4">
-      <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
-        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-          Últimos Registros em Tempo Real
-        </h4>
-        <span className="text-[11px] text-slate-400">Auditoria Automática</span>
+    <div className="bg-white rounded-lg border border-slate-200 p-4">
+      <div className="text-xs font-semibold text-slate-500 uppercase mb-2.5">
+        Últimos Registros
       </div>
 
-      {events.length === 0 ? (
-        <div className="py-6 text-center text-xs text-slate-400">
-          Nenhum evento registrado até o momento nesta sessão.
-        </div>
-      ) : (
-        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-          {events.map((event) => (
+      <div className="space-y-2 max-h-64 overflow-y-auto pr-0.5">
+        {events.map((event) => {
+          if (event.eventType === 'DELIVERY') {
+            const times = getServiceTimes(event);
+
+            return (
+              <div
+                key={event.id}
+                className={`border rounded-lg p-2.5 text-xs transition-colors ${
+                  event.isVoided
+                    ? 'bg-rose-50/40 border-rose-200 text-slate-500'
+                    : 'bg-white border-slate-200 text-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between pb-1.5 border-b border-slate-100 mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="px-1.5 py-0.5 rounded font-bold text-[10px] bg-emerald-100 text-emerald-800 uppercase tracking-wide">
+                      Atendimento
+                    </span>
+                    <span className="font-bold text-slate-900">
+                      [{event.attendant?.code || 'A'}] {event.attendant?.displayName || 'Atendente'}
+                    </span>
+                    {event.isVoided && (
+                      <span className="text-rose-600 font-semibold text-[11px]">(Anulado)</span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded">
+                      Tempo: {times.durationSeconds}s
+                    </span>
+                    {!event.isVoided && isCollectionActive && (
+                      <button
+                        type="button"
+                        onClick={() => handleQuickVoid(event.id)}
+                        disabled={voidingId === event.id}
+                        className="text-slate-400 hover:text-rose-600 p-1 rounded hover:bg-rose-50 transition-colors"
+                        title="Desfazer"
+                      >
+                        <Undo2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="bg-slate-50 p-1.5 rounded border border-slate-100">
+                    <span className="text-slate-400 block font-semibold text-[9px] uppercase tracking-wider">
+                      Início
+                    </span>
+                    <span className="font-mono font-bold text-slate-800">
+                      {times.startTimeStr}
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 p-1.5 rounded border border-slate-100">
+                    <span className="text-slate-400 block font-semibold text-[9px] uppercase tracking-wider">
+                      Fim
+                    </span>
+                    <span className="font-mono font-bold text-slate-800">
+                      {times.endTimeStr}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
+          return (
             <div
               key={event.id}
-              className={`flex items-center justify-between p-2 rounded-lg text-xs transition-colors ${
+              className={`border rounded-lg p-2.5 text-xs transition-colors ${
                 event.isVoided
-                  ? 'bg-rose-50/50 text-rose-500 line-through'
-                  : 'bg-slate-50 text-slate-700 hover:bg-slate-100/80'
+                  ? 'bg-rose-50/40 border-rose-200 text-slate-500'
+                  : 'bg-white border-slate-200 text-slate-800'
               }`}
             >
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-slate-400">{formatTime(event.occurredAt)}</span>
-                <span
-                  className={`px-1.5 py-0.5 rounded font-semibold ${
-                    event.eventType === 'ARRIVAL'
-                      ? 'bg-blue-100 text-blue-800'
-                      : 'bg-emerald-100 text-emerald-800'
-                  }`}
-                >
-                  {event.eventType === 'ARRIVAL' ? 'Chegada' : 'Entrega'}
-                </span>
-                {event.attendant && (
-                  <span className="font-medium text-slate-900">
-                    [{event.attendant.code}] {event.attendant.displayName}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="px-1.5 py-0.5 rounded font-bold text-[10px] bg-blue-100 text-blue-800 uppercase tracking-wide">
+                    Chegada de Aluno
                   </span>
-                )}
-                {event.isVoided && (
-                  <span className="text-rose-600 font-medium not-italic">
-                    (Anulado: {event.voidReason || 'Sem motivo'})
+                  <span className="font-mono text-slate-700 font-semibold">
+                    {formatTime(event.occurredAt)}
                   </span>
+                  {event.queue && (
+                    <span className="text-slate-400">({event.queue.name})</span>
+                  )}
+                  {event.isVoided && (
+                    <span className="text-rose-600 font-semibold text-[11px]">(Anulado)</span>
+                  )}
+                </div>
+
+                {!event.isVoided && isCollectionActive && (
+                  <button
+                    type="button"
+                    onClick={() => handleQuickVoid(event.id)}
+                    disabled={voidingId === event.id}
+                    className="text-slate-400 hover:text-rose-600 p-1 rounded hover:bg-rose-50 transition-colors"
+                    title="Desfazer"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                  </button>
                 )}
               </div>
-
-              {!event.isVoided && isCollectionActive && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedEventToVoid(event)}
-                  className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
-                  title="Anular / Corrigir este registro"
-                >
-                  <Undo2 className="w-3.5 h-3.5" />
-                </button>
-              )}
             </div>
-          ))}
-        </div>
-      )}
-
-      {/* Modal de Anulação / Desfazer */}
-      <Modal
-        isOpen={!!selectedEventToVoid}
-        onClose={() => setSelectedEventToVoid(null)}
-        title="Anular Evento Registrado"
-      >
-        <div className="space-y-4">
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5 text-xs text-amber-900">
-            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <span className="font-semibold">Rastreabilidade e Integridade:</span> O evento não será apagado
-              do banco SQL, mas marcado como anulado e excluído dos cálculos de métricas com registro no log de
-              auditoria.
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Motivo da Anulação / Correção *
-            </label>
-            <input
-              type="text"
-              placeholder="Ex.: Clique duplicado acidental, atendente não concluiu entrega..."
-              value={voidReason}
-              onChange={(e) => setVoidReason(e.target.value)}
-              className="w-full text-xs px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600"
-              autoFocus
-            />
-          </div>
-
-          <div className="flex items-center justify-end gap-2 pt-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSelectedEventToVoid(null)}
-              disabled={isVoiding}
-            >
-              Cancelar
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={handleConfirmVoid}
-              disabled={!voidReason.trim() || isVoiding}
-              isLoading={isVoiding}
-            >
-              Confirmar Anulação
-            </Button>
-          </div>
-        </div>
-      </Modal>
+          );
+        })}
+      </div>
     </div>
   );
 };

@@ -11,7 +11,7 @@ export interface CreateInterruptionInput {
 export class InterruptionsService {
   async create(userId: string, collectionId: string, input: CreateInterruptionInput) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -51,9 +51,9 @@ export class InterruptionsService {
     return updated;
   }
 
-  async list(userId: string, collectionId: string) {
+  async list(_userId: string, collectionId: string) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {

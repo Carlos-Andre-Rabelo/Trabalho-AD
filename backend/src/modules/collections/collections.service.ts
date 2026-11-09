@@ -3,14 +3,60 @@ import { AppError } from '../../middleware/errorHandler.js';
 import { recordAuditLog } from '../audit/audit.service.js';
 import { CreateCollectionInput, UpdateCollectionInput } from './collections.schema.js';
 import { CollectionStatus, QueueMode } from '@prisma/client';
+import jwt from 'jsonwebtoken';
+import { env } from '../../config/env.js';
+import { sseManager } from '../events/events.sse.js';
+
+export function parseCollectionNotes(notes: string | null | undefined): { notesText: string | null; targetDurationMinutes: number | null } {
+  if (!notes) return { notesText: null, targetDurationMinutes: null };
+  try {
+    const parsed = JSON.parse(notes);
+    if (parsed && typeof parsed === 'object') {
+      return {
+        notesText: parsed.notesText ?? null,
+        targetDurationMinutes: typeof parsed.targetDurationMinutes === 'number' ? parsed.targetDurationMinutes : null,
+      };
+    }
+  } catch {
+    // Se não for JSON, checa padrão de tag [DURATION:X]
+    const match = notes.match(/\[DURATION:(\d+)\]/);
+    if (match) {
+      return {
+        notesText: notes.replace(/\[DURATION:\d+\]/, '').trim() || null,
+        targetDurationMinutes: parseInt(match[1], 10),
+      };
+    }
+  }
+  return { notesText: notes, targetDurationMinutes: null };
+}
+
+export function serializeCollectionNotes(
+  notesText: string | null | undefined,
+  targetDurationMinutes: number | null | undefined
+): string | null {
+  if (!notesText && (targetDurationMinutes === null || targetDurationMinutes === undefined)) return null;
+  return JSON.stringify({
+    notesText: notesText || null,
+    targetDurationMinutes: targetDurationMinutes ?? null,
+  });
+}
+
+export function formatCollectionResponse<T extends { notes?: string | null }>(col: T) {
+  const { notesText, targetDurationMinutes } = parseCollectionNotes(col.notes);
+  return {
+    ...col,
+    notes: notesText,
+    targetDurationMinutes,
+  };
+}
 
 export class CollectionsService {
-  async listUserCollections(userId: string, filter?: { status?: CollectionStatus; page?: number; limit?: number }) {
+  async listUserCollections(_userId: string, filter?: { status?: CollectionStatus; page?: number; limit?: number }) {
     const page = filter?.page || 1;
     const limit = filter?.limit || 20;
     const skip = (page - 1) * limit;
 
-    const where: any = { ownerId: userId };
+    const where: any = {};
     if (filter?.status) {
       where.status = filter.status;
     }
@@ -23,6 +69,7 @@ export class CollectionsService {
         take: limit,
         orderBy: { createdAt: 'desc' },
         include: {
+          owner: { select: { id: true, name: true, email: true } },
           attendants: true,
           queues: true,
           _count: {
@@ -34,8 +81,17 @@ export class CollectionsService {
       }),
     ]);
 
+    const formattedCollections = collections.map((col) => {
+      const { notesText, targetDurationMinutes } = parseCollectionNotes(col.notes);
+      return {
+        ...col,
+        notes: notesText,
+        targetDurationMinutes,
+      };
+    });
+
     return {
-      collections,
+      collections: formattedCollections,
       pagination: {
         total,
         page,
@@ -45,10 +101,11 @@ export class CollectionsService {
     };
   }
 
-  async getCollectionById(userId: string, collectionId: string) {
+  async getCollectionById(_userId: string, collectionId: string) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
       include: {
+        owner: { select: { id: true, name: true, email: true } },
         attendants: {
           orderBy: { code: 'asc' },
         },
@@ -80,22 +137,97 @@ export class CollectionsService {
       throw new AppError('Coleta não encontrada ou acesso não autorizado.', 404, 'NOT_FOUND');
     }
 
-    return collection;
+    const { notesText, targetDurationMinutes } = parseCollectionNotes(collection.notes);
+
+    // Auto-encerramento caso o temporizador configurado tenha atingido zero
+    if (collection.status === CollectionStatus.IN_PROGRESS && targetDurationMinutes && collection.startedAt) {
+      const startMs = new Date(collection.startedAt).getTime();
+      const nowMs = Date.now();
+      let pausesSec = 0;
+      if (collection.pauses) {
+        for (const p of collection.pauses) {
+          const pStart = new Date(p.startedAt).getTime();
+          const pEnd = p.endedAt ? new Date(p.endedAt).getTime() : nowMs;
+          pausesSec += Math.max(0, Math.floor((pEnd - pStart) / 1000));
+        }
+      }
+      const diffSec = Math.max(0, Math.floor((nowMs - startMs) / 1000));
+      const operationalSec = Math.max(0, diffSec - pausesSec);
+
+      if (operationalSec >= targetDurationMinutes * 60) {
+        try {
+          const finishedCol = await this.finishCollection(_userId, collectionId);
+          return {
+            ...finishedCol,
+            notes: notesText,
+            targetDurationMinutes,
+          };
+        } catch {
+          // Continua normalmente se já tiver sido finalizada concorrentemente
+        }
+      }
+    }
+
+    const grouped = await prisma.event.groupBy({
+      by: ['eventType', 'attendantId'],
+      where: { collectionId, isVoided: false },
+      _count: { _all: true },
+    });
+
+    let arrivals = 0;
+    const deliveriesByAttendant: Record<string, number> = {};
+    collection.attendants.forEach((a) => (deliveriesByAttendant[a.id] = 0));
+
+    for (const g of grouped) {
+      if (g.eventType === 'ARRIVAL') {
+        arrivals += g._count._all;
+      } else if (g.eventType === 'DELIVERY' && g.attendantId) {
+        deliveriesByAttendant[g.attendantId] = (deliveriesByAttendant[g.attendantId] || 0) + g._count._all;
+      }
+    }
+
+    return {
+      ...collection,
+      notes: notesText,
+      targetDurationMinutes,
+      eventCounts: {
+        arrivals,
+        deliveriesByAttendant,
+      },
+    };
   }
 
   async createCollection(userId: string, input: CreateCollectionInput) {
+    let ownerId = userId;
+    if (input.aferidorName && input.aferidorName.trim()) {
+      const name = input.aferidorName.trim();
+      let user = await prisma.user.findFirst({ where: { name } });
+      if (!user) {
+        const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '') || 'aferidor';
+        user = await prisma.user.create({
+          data: {
+            name,
+            email: `${slug}-${Date.now()}@aferidor.local`,
+            passwordHash: 'NOPASSWORD',
+          },
+        });
+      }
+      ownerId = user.id;
+    }
+
     return await prisma.$transaction(async (tx) => {
       // 1. Criar a Coleta
+      const serializedNotes = serializeCollectionNotes(input.notes, input.targetDurationMinutes);
       const collection = await tx.collection.create({
         data: {
-          ownerId: userId,
+          ownerId,
           title: input.title,
           description: input.description,
           location: input.location,
           timezone: input.timezone || 'America/Sao_Paulo',
           queueMode: input.queueMode as QueueMode,
           status: CollectionStatus.DRAFT,
-          notes: input.notes,
+          notes: serializedNotes,
         },
       });
 
@@ -174,15 +306,63 @@ export class CollectionsService {
         },
       });
 
-      return tx.collection.findUnique({
+      const created = await tx.collection.findUnique({
         where: { id: collection.id },
-        include: { attendants: true, queues: true },
+        include: {
+          owner: { select: { id: true, name: true, email: true } },
+          attendants: true,
+          queues: true,
+        },
       });
+
+      const remoteToken = jwt.sign(
+        {
+          userId,
+          collectionId: collection.id,
+          role: 'REMOTE_AFERIDOR',
+        },
+        env.JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      return {
+        ...created,
+        notes: input.notes || null,
+        targetDurationMinutes: input.targetDurationMinutes ?? null,
+        remoteToken,
+      };
     });
+  }
+
+  async generateRemoteToken(userId: string, collectionId: string) {
+    const collection = await this.getCollectionById(userId, collectionId);
+    const token = jwt.sign(
+      {
+        userId,
+        collectionId: collection.id,
+        role: 'REMOTE_AFERIDOR',
+      },
+      env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    return {
+      token,
+      collectionId: collection.id,
+      title: collection.title,
+      status: collection.status,
+    };
   }
 
   async updateCollection(userId: string, collectionId: string, input: UpdateCollectionInput) {
     const existing = await this.getCollectionById(userId, collectionId);
+
+    const currentNotes = parseCollectionNotes(existing.notes);
+    const newNotesText = input.notes !== undefined ? input.notes : currentNotes.notesText;
+    const newDuration =
+      input.targetDurationMinutes !== undefined
+        ? input.targetDurationMinutes
+        : currentNotes.targetDurationMinutes;
+    const serializedNotes = serializeCollectionNotes(newNotesText, newDuration);
 
     const updated = await prisma.collection.update({
       where: { id: collectionId },
@@ -190,7 +370,7 @@ export class CollectionsService {
         title: input.title,
         description: input.description,
         location: input.location,
-        notes: input.notes,
+        notes: serializedNotes,
       },
     });
 
@@ -204,7 +384,11 @@ export class CollectionsService {
       newValues: { title: updated.title, notes: updated.notes },
     });
 
-    return updated;
+    return {
+      ...updated,
+      notes: newNotesText,
+      targetDurationMinutes: newDuration,
+    };
   }
 
   async startCollection(userId: string, collectionId: string) {
@@ -234,7 +418,10 @@ export class CollectionsService {
       newValues: { status: updated.status, startedAt: updated.startedAt },
     });
 
-    return updated;
+    const formatted = formatCollectionResponse(updated);
+    sseManager.broadcast(collectionId, 'collection:status', formatted);
+
+    return formatted;
   }
 
   async pauseCollection(userId: string, collectionId: string, reason?: string) {
@@ -273,7 +460,10 @@ export class CollectionsService {
         },
       });
 
-      return updated;
+      const formatted = formatCollectionResponse(updated);
+      sseManager.broadcast(collectionId, 'collection:status', formatted);
+
+      return formatted;
     });
   }
 
@@ -317,7 +507,10 @@ export class CollectionsService {
         },
       });
 
-      return updated;
+      const formatted = formatCollectionResponse(updated);
+      sseManager.broadcast(collectionId, 'collection:status', formatted);
+
+      return formatted;
     });
   }
 
@@ -365,7 +558,10 @@ export class CollectionsService {
         },
       });
 
-      return updated;
+      const formatted = formatCollectionResponse(updated);
+      sseManager.broadcast(collectionId, 'collection:status', formatted);
+
+      return formatted;
     });
   }
 
@@ -395,7 +591,34 @@ export class CollectionsService {
       newValues: { status: updated.status, reason },
     });
 
-    return updated;
+    const formatted = formatCollectionResponse(updated);
+    sseManager.broadcast(collectionId, 'collection:status', formatted);
+
+    return formatted;
+  }
+
+  async deleteCollection(userId: string, collectionId: string) {
+    // Garante que a coleta existe e o usuário tem acesso
+    await this.getCollectionById(userId, collectionId);
+
+    return await prisma.$transaction(async (tx) => {
+      // Deleta entidades vinculadas para garantir integridade referencial
+      await tx.auditLog.deleteMany({ where: { collectionId } });
+      await tx.event.deleteMany({ where: { collectionId } });
+      await tx.proteinMeasurement.deleteMany({ where: { collectionId } });
+      await tx.serviceInterval.deleteMany({ where: { collectionId } });
+      await tx.interruption.deleteMany({ where: { collectionId } });
+      await tx.collectionPause.deleteMany({ where: { collectionId } });
+      await tx.queueAttendant.deleteMany({ where: { queue: { collectionId } } });
+      await tx.queue.deleteMany({ where: { collectionId } });
+      await tx.attendant.deleteMany({ where: { collectionId } });
+
+      const deleted = await tx.collection.delete({
+        where: { id: collectionId },
+      });
+
+      return deleted;
+    });
   }
 }
 

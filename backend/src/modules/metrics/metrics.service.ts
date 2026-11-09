@@ -1,13 +1,16 @@
 import { prisma } from '../../config/prisma.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { computeCollectionMetrics } from '../../utils/statistics.js';
-import { generateRawEventsCsv, generateAggregatedMetricsCsv } from '../../utils/csvExport.js';
+import { generateRawEventsCsv, generateAggregatedMetricsCsv, generateCompleteConsolidatedCsv } from '../../utils/csvExport.js';
+import { generateCollectionExcelBuffer } from '../../utils/excelExport.js';
+import { parseCollectionNotes } from '../collections/collections.service.js';
 
 export class MetricsService {
-  async getCollectionMetrics(userId: string, collectionId: string) {
+  async getCollectionMetrics(_userId: string, collectionId: string) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
       include: {
+        owner: { select: { id: true, name: true, email: true } },
         attendants: { orderBy: { code: 'asc' } },
         pauses: { orderBy: { startedAt: 'asc' } },
         proteinMeasurements: true,
@@ -53,6 +56,8 @@ export class MetricsService {
       proteinMeasurements: collection.proteinMeasurements,
     });
 
+    const { notesText, targetDurationMinutes } = parseCollectionNotes(collection.notes);
+
     return {
       collection: {
         id: collection.id,
@@ -63,14 +68,17 @@ export class MetricsService {
         endedAt: collection.endedAt,
         location: collection.location,
         timezone: collection.timezone,
+        owner: (collection as any).owner,
+        notes: notesText,
+        targetDurationMinutes,
       },
       metrics,
     };
   }
 
-  async getTimelineData(userId: string, collectionId: string, bucketMinutes = 5) {
+  async getTimelineData(_userId: string, collectionId: string, bucketMinutes = 5) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
       include: { attendants: { orderBy: { code: 'asc' } } },
     });
 
@@ -147,18 +155,22 @@ export class MetricsService {
     return buckets;
   }
 
-  async getDashboardSummary(userId: string) {
+  async getDashboardSummary(_userId: string) {
     const [totalCollections, inProgressCollections, recentCollections, totalDeliveriesResult] = await Promise.all([
-      prisma.collection.count({ where: { ownerId: userId } }),
+      prisma.collection.count(),
       prisma.collection.findMany({
-        where: { ownerId: userId, status: 'IN_PROGRESS' },
-        include: { attendants: true, _count: { select: { events: { where: { isVoided: false } } } } },
+        where: { status: 'IN_PROGRESS' },
+        include: {
+          owner: { select: { id: true, name: true, email: true } },
+          attendants: true,
+          _count: { select: { events: { where: { isVoided: false } } } },
+        },
       }),
       prisma.collection.findMany({
-        where: { ownerId: userId },
         orderBy: { createdAt: 'desc' },
         take: 5,
         include: {
+          owner: { select: { id: true, name: true, email: true } },
           attendants: true,
           _count: {
             select: {
@@ -169,7 +181,6 @@ export class MetricsService {
       }),
       prisma.event.count({
         where: {
-          collection: { ownerId: userId },
           eventType: 'DELIVERY',
           isVoided: false,
         },
@@ -178,15 +189,15 @@ export class MetricsService {
 
     // Última coleta encerrada
     const lastFinished = await prisma.collection.findFirst({
-      where: { ownerId: userId, status: 'FINISHED' },
+      where: { status: 'FINISHED' },
       orderBy: { endedAt: 'desc' },
-      include: { attendants: true },
+      include: { attendants: true, owner: { select: { id: true, name: true, email: true } } },
     });
 
     let lastFinishedMetrics = null;
     if (lastFinished) {
       try {
-        lastFinishedMetrics = await this.getCollectionMetrics(userId, lastFinished.id);
+        lastFinishedMetrics = await this.getCollectionMetrics(_userId, lastFinished.id);
       } catch (e) {
         // Ignora se não houver dados suficientes
       }
@@ -202,9 +213,9 @@ export class MetricsService {
     };
   }
 
-  async exportRawCsv(userId: string, collectionId: string) {
+  async exportRawCsv(_userId: string, collectionId: string) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -223,6 +234,51 @@ export class MetricsService {
   async exportAggregatedCsv(userId: string, collectionId: string) {
     const { collection, metrics } = await this.getCollectionMetrics(userId, collectionId);
     return generateAggregatedMetricsCsv(collection, metrics);
+  }
+
+  async exportExcel(userId: string, collectionId: string): Promise<Buffer> {
+    const { collection, metrics } = await this.getCollectionMetrics(userId, collectionId);
+
+    const [events, serviceIntervals, timeline] = await Promise.all([
+      prisma.event.findMany({
+        where: { collectionId },
+        orderBy: { occurredAt: 'asc' },
+        include: { attendant: true, queue: true },
+      }),
+      prisma.serviceInterval.findMany({
+        where: { collectionId },
+        orderBy: { startedAt: 'asc' },
+        include: { attendant: true, queue: true, proteinMeasurements: true },
+      }),
+      this.getTimelineData(userId, collectionId, 1).catch(() => []),
+    ]);
+
+    return generateCollectionExcelBuffer({
+      collection,
+      metrics,
+      events,
+      serviceIntervals,
+      timeline,
+    });
+  }
+
+  async exportCompleteCsv(userId: string, collectionId: string): Promise<string> {
+    const { collection, metrics } = await this.getCollectionMetrics(userId, collectionId);
+
+    const [events, serviceIntervals] = await Promise.all([
+      prisma.event.findMany({
+        where: { collectionId },
+        orderBy: { occurredAt: 'asc' },
+        include: { attendant: true, queue: true },
+      }),
+      prisma.serviceInterval.findMany({
+        where: { collectionId },
+        orderBy: { startedAt: 'asc' },
+        include: { attendant: true, queue: true },
+      }),
+    ]);
+
+    return generateCompleteConsolidatedCsv(collection, metrics, events, serviceIntervals);
   }
 }
 

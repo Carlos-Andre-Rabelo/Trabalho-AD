@@ -19,6 +19,7 @@ export async function apiRequest<T = any>(
   options: RequestInit & { idempotencyKey?: string } = {}
 ): Promise<T> {
   const token = localStorage.getItem('ru_metrics_token');
+  const savedName = localStorage.getItem('ru_aferidor_name') || '';
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -27,6 +28,10 @@ export async function apiRequest<T = any>(
 
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  if (savedName) {
+    headers['X-User-Name'] = savedName;
   }
 
   if (options.idempotencyKey) {
@@ -45,12 +50,9 @@ export async function apiRequest<T = any>(
     throw new ApiError('Sem conexão com o servidor. Verifique sua rede.', 0, 'NETWORK_ERROR');
   }
 
+  // Com o login removido, nunca redirecionamos para login
   if (response.status === 401) {
     localStorage.removeItem('ru_metrics_token');
-    localStorage.removeItem('ru_metrics_user');
-    if (!window.location.pathname.includes('/login') && !window.location.pathname.includes('/register')) {
-      window.location.href = '/login';
-    }
   }
 
   const contentType = response.headers.get('content-type');

@@ -86,6 +86,24 @@ export class CollectionsController {
       next(error);
     }
   }
+
+  async getRemoteToken(req: Request, res: Response, next: NextFunction) {
+    try {
+      const data = await collectionsService.generateRemoteToken(req.user!.id, req.params.id);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async delete(req: Request, res: Response, next: NextFunction) {
+    try {
+      await collectionsService.deleteCollection(req.user!.id, req.params.id);
+      return res.status(200).json({ success: true, message: 'Coleta excluída com sucesso.' });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const collectionsController = new CollectionsController();

@@ -6,6 +6,7 @@ import { loginSchema, registerSchema } from './auth.schema.js';
 
 const router = Router();
 
+router.post('/name', (req, res, next) => authController.setName(req, res, next));
 router.post('/register', validate(registerSchema), (req, res, next) => authController.register(req, res, next));
 router.post('/login', validate(loginSchema), (req, res, next) => authController.login(req, res, next));
 router.post('/logout', (req, res) => authController.logout(req, res));

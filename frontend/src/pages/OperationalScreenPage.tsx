@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { collectionsApi, Collection } from '../api/collections.js';
 import { eventsApi, EventItem } from '../api/events.js';
@@ -7,22 +7,13 @@ import { OperationalTimer } from '../components/operational/OperationalTimer.js'
 import { AttendantCard } from '../components/operational/AttendantCard.js';
 import { ArrivalButton } from '../components/operational/ArrivalButton.js';
 import { EventLogQuickView } from '../components/operational/EventLogQuickView.js';
-import { InterruptionModal } from '../components/operational/InterruptionModal.js';
+import { QrCodeSyncModal } from '../components/operational/QrCodeSyncModal.js';
+import { useCollectionSync } from '../hooks/useCollectionSync.js';
 import { Button } from '../components/common/Button.js';
-import { Modal } from '../components/common/Modal.js';
 import { useConnectivity } from '../context/ConnectivityContext.js';
 import { enqueueOfflineEvent } from '../api/offlineQueue.js';
-import {
-  Play,
-  Pause,
-  AlertTriangle,
-  RotateCcw,
-  BarChart3,
-  Clock,
-  Zap,
-  AlertCircle,
-  FileText,
-} from 'lucide-react';
+import { metricsApi } from '../api/metrics.js';
+import { BarChart3, QrCode, FileSpreadsheet } from 'lucide-react';
 
 export const OperationalScreenPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -34,19 +25,72 @@ export const OperationalScreenPage: React.FC = () => {
   const [activeServices, setActiveServices] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
-  const [isTimedMode, setIsTimedMode] = useState(false);
+  const [isQrModalOpen, setIsQrModalOpen] = useState(false);
 
-  // Modais
-  const [isInterruptionModalOpen, setIsInterruptionModalOpen] = useState(false);
-  const [isFinishConfirmOpen, setIsFinishConfirmOpen] = useState(false);
-  const [isPauseConfirmOpen, setIsPauseConfirmOpen] = useState(false);
-  const [pauseReason, setPauseReason] = useState('');
-  const [isReopenModalOpen, setIsReopenModalOpen] = useState(false);
-  const [reopenReason, setReopenReason] = useState('');
-
-  // Contagens locais rápidas
   const [deliveriesByAttendant, setDeliveriesByAttendant] = useState<Record<string, number>>({});
   const [totalArrivals, setTotalArrivals] = useState(0);
+
+  // Deduplicação de eventos entre resposta HTTP local e broadcast SSE
+  const processedEventIds = useRef<Set<string>>(new Set());
+  const voidedEventIds = useRef<Set<string>>(new Set());
+
+  const applyEventCreated = useCallback((newEvent: EventItem) => {
+    setRecentEvents((prev) => [newEvent, ...prev.filter((e) => e.id !== newEvent.id)].slice(0, 10));
+    if (processedEventIds.current.has(newEvent.id)) return;
+    processedEventIds.current.add(newEvent.id);
+
+    if (!newEvent.isVoided) {
+      if (newEvent.eventType === 'ARRIVAL') {
+        setTotalArrivals((prev) => prev + 1);
+      } else if (newEvent.eventType === 'DELIVERY' && newEvent.attendantId) {
+        setDeliveriesByAttendant((prev) => ({
+          ...prev,
+          [newEvent.attendantId!]: (prev[newEvent.attendantId!] || 0) + 1,
+        }));
+      }
+    }
+  }, []);
+
+  const applyEventVoided = useCallback((voidedEvent: EventItem) => {
+    setRecentEvents((prev) =>
+      prev.map((e) => (e.id === voidedEvent.id ? { ...e, isVoided: true } : e))
+    );
+    if (voidedEventIds.current.has(voidedEvent.id)) return;
+    voidedEventIds.current.add(voidedEvent.id);
+
+    if (voidedEvent.eventType === 'ARRIVAL') {
+      setTotalArrivals((prev) => Math.max(0, prev - 1));
+    } else if (voidedEvent.eventType === 'DELIVERY' && voidedEvent.attendantId) {
+      setDeliveriesByAttendant((prev) => ({
+        ...prev,
+        [voidedEvent.attendantId!]: Math.max(0, (prev[voidedEvent.attendantId!] || 1) - 1),
+      }));
+    }
+  }, []);
+
+  const { connectedClients } = useCollectionSync({
+    collectionId: id,
+    onEventCreated: applyEventCreated,
+    onEventVoided: applyEventVoided,
+    onStatusChanged: (col) => {
+      setCollection((prev) => (prev ? { ...prev, status: col.status } : col));
+    },
+    onServiceStarted: (interval) => {
+      setActiveServices((prev) => {
+        if (prev.some((s) => s.attendantId === interval.attendantId)) return prev;
+        return [...prev, interval];
+      });
+    },
+    onServiceFinished: ({ interval, event }) => {
+      setActiveServices((prev) => prev.filter((s) => s.attendantId !== interval.attendantId));
+      if (event) {
+        applyEventCreated(event);
+      }
+    },
+    onServiceCancelled: ({ attendantId }) => {
+      setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
+    },
+  });
 
   const loadData = useCallback(async () => {
     if (!id) return;
@@ -61,28 +105,33 @@ export const OperationalScreenPage: React.FC = () => {
       setRecentEvents(recent);
       setActiveServices(active);
 
-      // Calcular contagens a partir dos eventos
-      const deliveriesCount: Record<string, number> = {};
-      colData.attendants.forEach((a) => (deliveriesCount[a.id] = 0));
-      let arrivalsCount = 0;
-
       recent.forEach((e) => {
-        if (!e.isVoided) {
-          if (e.eventType === 'DELIVERY' && e.attendantId) {
-            deliveriesCount[e.attendantId] = (deliveriesCount[e.attendantId] || 0) + 1;
-          } else if (e.eventType === 'ARRIVAL') {
-            arrivalsCount++;
-          }
-        }
+        processedEventIds.current.add(e.id);
+        if (e.isVoided) voidedEventIds.current.add(e.id);
       });
 
-      // Se temos o count consolidado da API
-      if (colData._count?.events) {
-        // Se a API traz mais eventos no total
-      }
+      const deliveriesCount: Record<string, number> = {};
+      colData.attendants.forEach((a) => {
+        deliveriesCount[a.id] = colData.eventCounts?.deliveriesByAttendant?.[a.id] ?? 0;
+      });
 
-      setDeliveriesByAttendant(deliveriesCount);
-      setTotalArrivals(arrivalsCount);
+      if (colData.eventCounts) {
+        setDeliveriesByAttendant(deliveriesCount);
+        setTotalArrivals(colData.eventCounts.arrivals);
+      } else {
+        let arrivalsCount = 0;
+        recent.forEach((e) => {
+          if (!e.isVoided) {
+            if (e.eventType === 'DELIVERY' && e.attendantId) {
+              deliveriesCount[e.attendantId] = (deliveriesCount[e.attendantId] || 0) + 1;
+            } else if (e.eventType === 'ARRIVAL') {
+              arrivalsCount++;
+            }
+          }
+        });
+        setDeliveriesByAttendant(deliveriesCount);
+        setTotalArrivals(arrivalsCount);
+      }
     } catch (e) {
       console.error('Erro ao carregar dados operacionais da coleta', e);
     } finally {
@@ -92,16 +141,8 @@ export const OperationalScreenPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
-    // Polling inteligente leve a cada 10s para manter dispositivos sincronizados
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        loadData();
-      }
-    }, 10000);
-    return () => clearInterval(timer);
   }, [loadData]);
 
-  // Ações de Estado da Coleta
   const handleStartCollection = async () => {
     if (!id) return;
     setActionLoading(true);
@@ -113,14 +154,12 @@ export const OperationalScreenPage: React.FC = () => {
     }
   };
 
-  const handlePauseConfirm = async () => {
+  const handlePauseCollection = async () => {
     if (!id) return;
     setActionLoading(true);
     try {
-      const updated = await collectionsApi.pause(id, pauseReason.trim() || undefined);
+      const updated = await collectionsApi.pause(id);
       setCollection(updated);
-      setIsPauseConfirmOpen(false);
-      setPauseReason('');
     } finally {
       setActionLoading(false);
     }
@@ -137,40 +176,35 @@ export const OperationalScreenPage: React.FC = () => {
     }
   };
 
-  const handleFinishConfirm = async () => {
+  const handleFinishCollection = async () => {
     if (!id) return;
     setActionLoading(true);
     try {
       const updated = await collectionsApi.finish(id);
       setCollection(updated);
-      setIsFinishConfirmOpen(false);
-      navigate(`/coletas/${id}`); // Vai para análise detalhada
+      navigate(`/coletas/${id}`);
     } finally {
       setActionLoading(false);
     }
   };
 
-  const handleReopenConfirm = async () => {
-    if (!id || !reopenReason.trim()) return;
+  const handleReopenCollection = async () => {
+    if (!id) return;
     setActionLoading(true);
     try {
-      const updated = await collectionsApi.reopen(id, reopenReason.trim());
+      const updated = await collectionsApi.reopen(id, 'Reaberta pelo aferidor');
       setCollection(updated);
-      setIsReopenModalOpen(false);
-      setReopenReason('');
     } finally {
       setActionLoading(false);
     }
   };
 
-  // Registro de Chegada
   const handleRegisterArrival = async (queueId?: string) => {
     if (!id) return;
     const idempotencyKey = `arr-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const nowIso = new Date().toISOString();
 
     if (!isOnline) {
-      // Salva na fila local offline
       enqueueOfflineEvent({
         id: idempotencyKey,
         collectionId: id,
@@ -189,124 +223,59 @@ export const OperationalScreenPage: React.FC = () => {
         idempotencyKey,
         occurredAt: nowIso,
       });
-      setTotalArrivals((prev) => prev + 1);
-      setRecentEvents((prev) => [newEvent, ...prev.slice(0, 9)]);
-    } catch (e: any) {
+      applyEventCreated(newEvent);
+    } catch (e) {
       console.error('Falha ao registrar chegada:', e);
     }
   };
 
-  // Registro de Entrega Rápida (Modo Rápido)
-  const handleQuickDelivery = async (attendantId: string) => {
-    if (!id) return;
-    const idempotencyKey = `del-${attendantId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    const nowIso = new Date().toISOString();
-
-    if (!isOnline) {
-      enqueueOfflineEvent({
-        id: idempotencyKey,
-        collectionId: id,
-        eventType: 'DELIVERY',
-        attendantId,
-        occurredAt: nowIso,
-      });
-      setDeliveriesByAttendant((prev) => ({
-        ...prev,
-        [attendantId]: (prev[attendantId] || 0) + 1,
-      }));
-      return;
-    }
-
-    try {
-      const newEvent = await eventsApi.create(id, {
-        eventType: 'DELIVERY',
-        attendantId,
-        idempotencyKey,
-        occurredAt: nowIso,
-      });
-
-      setDeliveriesByAttendant((prev) => ({
-        ...prev,
-        [attendantId]: (prev[attendantId] || 0) + 1,
-      }));
-      setRecentEvents((prev) => [newEvent, ...prev.slice(0, 9)]);
-    } catch (e: any) {
-      console.error('Falha ao registrar entrega:', e);
-    }
-  };
-
-  // Registro de Início de Atendimento Cronometrado
-  const handleStartTimedService = async (attendantId: string) => {
+  const handleStartService = async (attendantId: string) => {
     if (!id) return;
     try {
       const interval = await servicesApi.startService(id, { attendantId });
-      setActiveServices((prev) => [...prev, interval]);
+      setActiveServices((prev) => {
+        if (prev.some((s) => s.attendantId === attendantId)) return prev;
+        return [...prev, interval];
+      });
     } catch (e: any) {
-      alert(e?.message || 'Falha ao iniciar cronômetro do atendimento.');
+      alert(e?.message || 'Falha ao iniciar atendimento.');
     }
   };
 
-  // Conclusão de Atendimento Cronometrado
-  const handleFinishTimedService = async (
-    attendantId: string,
-    serviceId?: string,
-    proteinAmount?: number
-  ) => {
+  const handleFinishService = async (attendantId: string, serviceId?: string) => {
     if (!id) return;
-    const idempotencyKey = `timed-del-${attendantId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const idempotencyKey = `del-${attendantId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
     try {
       const result = await servicesApi.finishService(id, {
         attendantId,
         serviceIntervalId: serviceId,
         idempotencyKey,
-        proteinAmount,
       });
 
-      // Remove do array de ativos
       setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
-      setDeliveriesByAttendant((prev) => ({
-        ...prev,
-        [attendantId]: (prev[attendantId] || 0) + 1,
-      }));
       if (result.event) {
-        setRecentEvents((prev) => [result.event, ...prev.slice(0, 9)]);
+        applyEventCreated(result.event);
       }
     } catch (e: any) {
-      alert(e?.message || 'Falha ao concluir atendimento cronometrado.');
+      alert(e?.message || 'Falha ao concluir atendimento.');
     }
   };
 
-  // Anular Evento
   const handleVoidEvent = async (eventId: string, reason: string) => {
     if (!id) return;
     try {
       const updated = await eventsApi.void(id, eventId, reason);
-      setRecentEvents((prev) => prev.map((e) => (e.id === eventId ? updated : e)));
-      // Atualiza contagens
-      if (updated.eventType === 'DELIVERY' && updated.attendantId) {
-        setDeliveriesByAttendant((prev) => ({
-          ...prev,
-          [updated.attendantId!]: Math.max(0, (prev[updated.attendantId!] || 1) - 1),
-        }));
-      } else if (updated.eventType === 'ARRIVAL') {
-        setTotalArrivals((prev) => Math.max(0, prev - 1));
-      }
+      applyEventVoided(updated);
     } catch (e: any) {
       alert(e?.message || 'Falha ao anular evento.');
     }
   };
 
-  // Registrar Ocorrência
-  const handleCreateInterruption = async (data: any) => {
-    if (!id) return;
-    await servicesApi.createInterruption(id, data);
-  };
-
   if (isLoading || !collection) {
     return (
-      <div className="flex items-center justify-center py-24 text-slate-400 text-sm">
-        Carregando console operacional...
+      <div className="flex items-center justify-center py-20 text-slate-400 text-xs">
+        Carregando...
       </div>
     );
   }
@@ -314,108 +283,74 @@ export const OperationalScreenPage: React.FC = () => {
   const isCollectionActive = collection.status === 'IN_PROGRESS';
 
   return (
-    <div className="space-y-4 max-w-5xl mx-auto">
-      {/* Barra de Cronômetro e Estado Superior */}
+    <div className="space-y-3 max-w-4xl mx-auto">
       <OperationalTimer
         collection={collection}
-        onPause={() => setIsPauseConfirmOpen(true)}
+        onStart={handleStartCollection}
+        onPause={handlePauseCollection}
         onResume={handleResumeCollection}
-        onFinish={() => setIsFinishConfirmOpen(true)}
-        onReopen={() => setIsReopenModalOpen(true)}
+        onFinish={handleFinishCollection}
+        onReopen={handleReopenCollection}
+        onCollectionUpdated={(updated) => setCollection(updated)}
         isActionLoading={actionLoading}
       />
 
-      {/* Se Coleta estiver em Rascunho, botão de iniciar */}
-      {collection.status === 'DRAFT' && (
-        <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 text-center space-y-3">
-          <div className="text-sm font-bold text-blue-950">
-            Esta coleta está em Rascunho. O cronômetro e os botões de registro ainda não foram iniciados.
-          </div>
-          <p className="text-xs text-blue-800 max-w-md mx-auto">
-            Assim que você estiver posicionado em frente à bancada de distribuição de proteína, clique
-            no botão abaixo para iniciar o registro oficial.
-          </p>
-          <Button
-            variant="success"
-            size="lg"
-            onClick={handleStartCollection}
-            isLoading={actionLoading}
-            className="font-bold text-base px-8 shadow-md"
-          >
-            <Play className="w-5 h-5 fill-current mr-2" />
-            Iniciar Aferição da Coleta
-          </Button>
-        </div>
-      )}
-
-      {/* Se Coleta estiver Pausada, aviso claro */}
-      {collection.status === 'PAUSED' && (
-        <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex items-center justify-between gap-3 text-xs text-amber-900">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-amber-700" />
-            <span>
-              <strong>Coleta Pausada:</strong> O tempo de pausa é descontado dos cálculos de Throughput e
-              taxas operacionais. Clique em <strong>Retomar</strong> para continuar registrando.
-            </span>
-          </div>
-          <Button variant="success" size="sm" onClick={handleResumeCollection} className="gap-1 font-bold">
-            <Play className="w-3.5 h-3.5 fill-current" /> Retomar
-          </Button>
-        </div>
-      )}
-
-      {/* Alternância de Modo (Rápido vs Cronometrado) & Ações Complementares */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-white p-3 rounded-xl border border-slate-200">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-slate-700">Modo de Coleta:</span>
-          <div className="flex items-center p-1 bg-slate-100 rounded-lg text-xs font-medium">
-            <button
-              onClick={() => setIsTimedMode(false)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-colors ${
-                !isTimedMode
-                  ? 'bg-white text-blue-900 font-bold shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Zap className="w-3.5 h-3.5" />
-              <span>Modo Rápido (1 clique)</span>
-            </button>
-            <button
-              onClick={() => setIsTimedMode(true)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-colors ${
-                isTimedMode
-                  ? 'bg-white text-blue-900 font-bold shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Clock className="w-3.5 h-3.5" />
-              <span>Modo Cronometrado</span>
-            </button>
-          </div>
-        </div>
+      {/* Barra de Ações Rápidas */}
+      <div className="flex items-center justify-between gap-2 bg-white p-2.5 rounded-lg border border-slate-200">
+        <span className="text-xs font-semibold text-slate-600">
+          Aferição em Tempo Real
+        </span>
 
         <div className="flex items-center gap-2">
           <Button
+            type="button"
             variant="outline"
             size="sm"
-            onClick={() => setIsInterruptionModalOpen(true)}
+            onClick={() => setIsQrModalOpen(true)}
             className="text-xs gap-1.5"
           >
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-            <span>Registrar Ocorrência</span>
+            <QrCode className="w-3.5 h-3.5 text-blue-600" />
+            <span>QR Celular</span>
+            {connectedClients > 1 && (
+              <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-800 rounded text-[10px] font-bold">
+                {connectedClients}
+              </span>
+            )}
           </Button>
 
+          {id && (
+            <a href={metricsApi.getExcelUrl(id)} download>
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs gap-1.5 text-emerald-700 border-emerald-300 hover:bg-emerald-50"
+                title="Baixar planilha Excel com todos os dados"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Exportar Excel</span>
+              </Button>
+            </a>
+          )}
+
           <Link to={`/coletas/${id}`}>
-            <Button variant="outline" size="sm" className="text-xs gap-1.5 text-blue-700">
+            <Button variant="outline" size="sm" className="text-xs gap-1.5">
               <BarChart3 className="w-3.5 h-3.5" />
-              <span>Ver Gráficos</span>
+              <span>Resultados</span>
             </Button>
           </Link>
         </div>
       </div>
 
-      {/* Cartões dos Atendentes (2 Atendentes Inicialmente ou Mais) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Botão de Chegada */}
+      <ArrivalButton
+        totalArrivals={totalArrivals}
+        onRegisterArrival={handleRegisterArrival}
+        isCollectionActive={isCollectionActive}
+        queues={collection.queues}
+      />
+
+      {/* Cartões dos Atendentes com Estados Iniciar e Finalizou Atendimento */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {collection.attendants.map((att) => {
           const activeForAtt = activeServices.find((s) => s.attendantId === att.id);
           const count = deliveriesByAttendant[att.id] || 0;
@@ -425,145 +360,31 @@ export const OperationalScreenPage: React.FC = () => {
               key={att.id}
               attendant={att}
               deliveriesCount={count}
-              throughputPerMinute={null}
-              meanServiceSeconds={null}
-              isTimedMode={isTimedMode}
               activeService={activeForAtt}
-              onQuickDelivery={handleQuickDelivery}
-              onStartTimedService={handleStartTimedService}
-              onFinishTimedService={handleFinishTimedService}
+              onStartService={handleStartService}
+              onFinishService={handleFinishService}
               isCollectionActive={isCollectionActive}
             />
           );
         })}
       </div>
 
-      {/* Botão de Chegada Separado */}
-      <ArrivalButton
-        totalArrivals={totalArrivals}
-        arrivalRatePerMinute={null}
-        onRegisterArrival={handleRegisterArrival}
-        isCollectionActive={isCollectionActive}
-        queues={collection.queues}
-      />
-
-      {/* Registro Rápido e Desfazer */}
+      {/* Registro Rápido e Desfazer em Retângulos de Atendimento */}
       <EventLogQuickView
         events={recentEvents}
         onVoidEvent={handleVoidEvent}
         isCollectionActive={isCollectionActive}
       />
 
-      {/* Modal de Confirmação de Encerramento */}
-      <Modal
-        isOpen={isFinishConfirmOpen}
-        onClose={() => setIsFinishConfirmOpen(false)}
-        title="Encerrar Sessão de Coleta"
-      >
-        <div className="space-y-4 text-xs">
-          <p className="text-slate-600 leading-relaxed">
-            Ao encerrar a coleta, o cronômetro oficial será finalizado e os cálculos finais de Throughput,
-            tempo médio de serviço e Teoria das Filas serão consolidados no banco SQL.
-          </p>
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 font-medium">
-            Você será redirecionado para o painel analítico com gráficos, comparação e exportação CSV.
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" size="sm" onClick={() => setIsFinishConfirmOpen(false)}>
-              Voltar à Coleta
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={handleFinishConfirm}
-              isLoading={actionLoading}
-              className="font-bold"
-            >
-              Confirmar e Encerrar
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* Modal de Pausa com Motivo */}
-      <Modal
-        isOpen={isPauseConfirmOpen}
-        onClose={() => setIsPauseConfirmOpen(false)}
-        title="Pausar Coleta Operacional"
-      >
-        <div className="space-y-4 text-xs">
-          <p className="text-slate-600">
-            Informe o motivo da pausa (ex.: reposição das cubas de proteína ou intervalo operacional).
-            Este tempo não será computado como tempo de serviço ativo.
-          </p>
-          <div>
-            <label className="block font-semibold text-slate-700 mb-1">Motivo da Pausa</label>
-            <input
-              type="text"
-              placeholder="Ex.: Troca de travessa de carne / reposição de cubas"
-              value={pauseReason}
-              onChange={(e) => setPauseReason(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-700 text-xs"
-              autoFocus
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" size="sm" onClick={() => setIsPauseConfirmOpen(false)}>
-              Cancelar
-            </Button>
-            <Button variant="outline" size="sm" onClick={handlePauseConfirm} isLoading={actionLoading}>
-              Pausar Agora
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* Modal de Reabertura com Auditoria */}
-      <Modal
-        isOpen={isReopenModalOpen}
-        onClose={() => setIsReopenModalOpen(false)}
-        title="Reabrir Coleta Encerrada"
-      >
-        <div className="space-y-4 text-xs">
-          <p className="text-slate-600">
-            A reabertura de uma coleta encerrada é um evento sensível. Forneça a justificativa acadêmica
-            que ficará gravada permanentemente no log de auditoria.
-          </p>
-          <div>
-            <label className="block font-semibold text-slate-700 mb-1">Justificativa *</label>
-            <input
-              type="text"
-              placeholder="Ex.: Necessidade de complementar amostragem do mesmo turno..."
-              value={reopenReason}
-              onChange={(e) => setReopenReason(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-700 text-xs"
-              autoFocus
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" size="sm" onClick={() => setIsReopenModalOpen(false)}>
-              Cancelar
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={handleReopenConfirm}
-              disabled={!reopenReason.trim()}
-              isLoading={actionLoading}
-            >
-              Reabrir Coleta
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* Modal de Ocorrências */}
-      <InterruptionModal
-        isOpen={isInterruptionModalOpen}
-        onClose={() => setIsInterruptionModalOpen(false)}
-        attendants={collection.attendants}
-        onSubmit={handleCreateInterruption}
-      />
+      {id && (
+        <QrCodeSyncModal
+          isOpen={isQrModalOpen}
+          onClose={() => setIsQrModalOpen(false)}
+          collectionId={id}
+          collectionTitle={collection.title}
+          connectedClientsCount={connectedClients}
+        />
+      )}
     </div>
   );
 };

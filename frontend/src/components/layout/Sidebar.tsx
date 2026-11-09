@@ -31,7 +31,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
     { to: '/coletas', label: 'Coletas', icon: ClipboardList },
     { to: '/coletas/nova', label: 'Nova Coleta', icon: PlusCircle },
     { to: '/configuracoes', label: 'Configurações', icon: Settings },
-    { to: '/perfil', label: 'Perfil e Sessão', icon: User },
+    { to: '/perfil', label: 'Identificação do Aferidor', icon: User },
   ];
 
   const sidebarContent = (
@@ -91,13 +91,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
 
       {/* User Session Footer */}
       <div className="p-3 border-t border-slate-800">
-        <button
-          onClick={handleLogout}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
-        >
-          <LogOut className="w-4 h-4" />
-          <span>Encerrar Sessão</span>
-        </button>
+        <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-slate-800/50 text-xs text-slate-300">
+          <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-[10px] uppercase">
+            {user?.name?.charAt(0) || 'A'}
+          </div>
+          <div className="truncate">
+            <span className="text-[10px] text-slate-500 block leading-tight">Aferidor Atual:</span>
+            <span className="font-semibold text-white truncate block">{user?.name || 'Aferidor'}</span>
+          </div>
+        </div>
       </div>
     </div>
   );

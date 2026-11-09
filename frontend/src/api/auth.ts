@@ -36,4 +36,12 @@ export const authApi = {
     const res = await apiRequest<{ success: boolean; data: User }>('/auth/me');
     return res.data;
   },
+
+  async setName(name: string): Promise<AuthResponse> {
+    const res = await apiRequest<{ success: boolean; data: AuthResponse }>('/auth/name', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+    return res.data;
+  },
 };

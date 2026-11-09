@@ -24,7 +24,15 @@ export interface Collection {
   status: CollectionStatus;
   startedAt?: string | null;
   endedAt?: string | null;
+  targetDurationMinutes?: number | null;
   notes?: string | null;
+  remoteToken?: string;
+  owner?: {
+    id: string;
+    name: string;
+    email?: string;
+  };
+  aferidorName?: string;
   createdAt: string;
   updatedAt: string;
   attendants: Attendant[];
@@ -34,6 +42,10 @@ export interface Collection {
     events: number;
     serviceIntervals?: number;
     proteinMeasurements?: number;
+  };
+  eventCounts?: {
+    arrivals: number;
+    deliveriesByAttendant: Record<string, number>;
   };
 }
 
@@ -56,11 +68,13 @@ export const collectionsApi = {
 
   async create(data: {
     title: string;
+    aferidorName?: string;
     description?: string;
     location?: string;
     queueMode: QueueMode;
     attendants: Array<{ code: string; displayName: string }>;
     queues?: string[];
+    targetDurationMinutes?: number | null;
     notes?: string;
   }): Promise<Collection> {
     const res = await apiRequest<{ success: boolean; data: Collection }>('/collections', {
@@ -70,7 +84,16 @@ export const collectionsApi = {
     return res.data;
   },
 
-  async update(id: string, data: { title?: string; description?: string; location?: string; notes?: string }) {
+  async update(
+    id: string,
+    data: {
+      title?: string;
+      description?: string;
+      location?: string;
+      targetDurationMinutes?: number | null;
+      notes?: string;
+    }
+  ) {
     const res = await apiRequest<{ success: boolean; data: Collection }>(`/collections/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
@@ -112,6 +135,18 @@ export const collectionsApi = {
       method: 'POST',
       body: JSON.stringify({ reason }),
     });
+    return res.data;
+  },
+
+  async delete(id: string): Promise<{ success: boolean; message: string }> {
+    const res = await apiRequest<{ success: boolean; message: string }>(`/collections/${id}`, {
+      method: 'DELETE',
+    });
+    return res;
+  },
+
+  async getRemoteToken(id: string): Promise<{ token: string; collectionId: string; title: string; status: CollectionStatus }> {
+    const res = await apiRequest<{ success: boolean; data: { token: string; collectionId: string; title: string; status: CollectionStatus } }>(`/collections/${id}/remote-token`);
     return res.data;
   },
 };

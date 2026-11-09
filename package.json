@@ -12,6 +12,8 @@
     "dev:backend": "npm run dev --workspace=backend",
     "dev:frontend": "npm run dev --workspace=frontend",
     "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
+    "vercel-build": "npx prisma generate --schema=backend/prisma/schema.prisma && npm run build",
+    "build:vercel": "npx prisma generate --schema=backend/prisma/schema.prisma && npm run build",
     "test": "npm run test --workspace=backend && npm run test --workspace=frontend",
     "test:unit": "npm run test:unit --workspace=backend",
     "test:integration": "npm run test:integration --workspace=backend",
@@ -26,5 +28,9 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@neon/config": "^1.13.0",
+    "@neon/env": "^2.1.0"
   }
 }

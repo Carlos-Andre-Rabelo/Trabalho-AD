@@ -1,74 +1,97 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { authApi, User } from '../api/auth.js';
 
 interface AuthContextType {
   user: User | null;
+  userName: string;
+  setUserName: (name: string) => Promise<void>;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (data: { email: string; password: string }) => Promise<void>;
-  register: (data: { name: string; email: string; password: string }) => Promise<void>;
+  login: (data: any) => Promise<void>;
+  register: (data: any) => Promise<void>;
   logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [userName, setUserNameState] = useState<string>(() => {
+    return localStorage.getItem('ru_aferidor_name') || 'Aferidor Principal';
+  });
+
   const [user, setUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('ru_metrics_user');
-    return saved ? JSON.parse(saved) : null;
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return {
+      id: 'default-user',
+      name: localStorage.getItem('ru_aferidor_name') || 'Aferidor Principal',
+      email: 'aferidor@rumetrics.local',
+    };
   });
-  const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const token = localStorage.getItem('ru_metrics_token');
-    if (token) {
-      authApi
-        .getMe()
-        .then((fetchedUser) => {
-          setUser(fetchedUser);
-          localStorage.setItem('ru_metrics_user', JSON.stringify(fetchedUser));
-        })
-        .catch(() => {
-          setUser(null);
-          localStorage.removeItem('ru_metrics_token');
-          localStorage.removeItem('ru_metrics_user');
-        })
-        .finally(() => {
-          setIsLoading(false);
-        });
-    } else {
-      setIsLoading(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const syncNameWithBackend = useCallback(async (name: string) => {
+    try {
+      const res = await authApi.setName(name);
+      localStorage.setItem('ru_metrics_token', res.token);
+      localStorage.setItem('ru_metrics_user', JSON.stringify(res.user));
+      localStorage.setItem('ru_aferidor_name', res.user.name);
+      setUser(res.user);
+      setUserNameState(res.user.name);
+    } catch (err) {
+      // Em modo offline, salva localmente
+      const localUser: User = {
+        id: 'local-user',
+        name,
+        email: `${name.toLowerCase().replace(/[^a-z0-9]/g, '')}@rumetrics.local`,
+      };
+      localStorage.setItem('ru_aferidor_name', name);
+      localStorage.setItem('ru_metrics_user', JSON.stringify(localUser));
+      setUser(localUser);
+      setUserNameState(name);
     }
   }, []);
 
-  const login = async (data: { email: string; password: string }) => {
-    const res = await authApi.login(data);
-    localStorage.setItem('ru_metrics_token', res.token);
-    localStorage.setItem('ru_metrics_user', JSON.stringify(res.user));
-    setUser(res.user);
+  const setUserName = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    await syncNameWithBackend(trimmed);
   };
 
-  const register = async (data: { name: string; email: string; password: string }) => {
-    const res = await authApi.register(data);
-    localStorage.setItem('ru_metrics_token', res.token);
-    localStorage.setItem('ru_metrics_user', JSON.stringify(res.user));
-    setUser(res.user);
+  useEffect(() => {
+    const currentName = localStorage.getItem('ru_aferidor_name') || 'Aferidor Principal';
+    syncNameWithBackend(currentName);
+  }, [syncNameWithBackend]);
+
+  const login = async (data: any) => {
+    if (data?.name) {
+      await setUserName(data.name);
+    }
+  };
+
+  const register = async (data: any) => {
+    if (data?.name) {
+      await setUserName(data.name);
+    }
   };
 
   const logout = async () => {
-    try {
-      await authApi.logout();
-    } catch (e) {}
-    localStorage.removeItem('ru_metrics_token');
-    localStorage.removeItem('ru_metrics_user');
-    setUser(null);
+    // Apenas redefine para o padrão, sem deslogar forçado
+    await setUserName('Aferidor Principal');
   };
 
   return (
     <AuthContext.Provider
       value={{
         user,
-        isAuthenticated: !!user,
+        userName,
+        setUserName,
+        isAuthenticated: true,
         isLoading,
         login,
         register,

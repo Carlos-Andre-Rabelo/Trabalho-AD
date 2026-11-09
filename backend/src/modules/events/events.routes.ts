@@ -11,6 +11,7 @@ router.use(authMiddleware);
 router.post('/', validate(createEventSchema), (req, res, next) => eventsController.create(req, res, next));
 router.get('/', validate(listEventsQuerySchema), (req, res, next) => eventsController.list(req, res, next));
 router.get('/recent', (req, res, next) => eventsController.recent(req, res, next));
+router.get('/stream', (req, res) => eventsController.stream(req, res));
 router.post('/:eventId/void', validate(voidEventSchema), (req, res, next) => eventsController.voidEvent(req, res, next));
 
 export const eventsRouter = router;

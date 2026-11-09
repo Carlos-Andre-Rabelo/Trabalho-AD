@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { eventsService } from './events.service.js';
+import { sseManager } from './events.sse.js';
 
 export class EventsController {
   async create(req: Request, res: Response, next: NextFunction) {
@@ -50,6 +51,22 @@ export class EventsController {
     } catch (error) {
       next(error);
     }
+  }
+
+  async stream(req: Request, res: Response) {
+    const collectionId = req.params.collectionId;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (res.flushHeaders) {
+      res.flushHeaders();
+    }
+
+    res.write(`event: connected\ndata: ${JSON.stringify({ collectionId, timestamp: new Date().toISOString() })}\n\n`);
+
+    const clientId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    sseManager.addClient(clientId, collectionId, res);
   }
 }
 

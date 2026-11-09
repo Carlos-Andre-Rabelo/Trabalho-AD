@@ -14,7 +14,7 @@ export interface CreateProteinMeasurementInput {
 export class ProteinService {
   async create(userId: string, collectionId: string, input: CreateProteinMeasurementInput) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
@@ -42,9 +42,9 @@ export class ProteinService {
     return measurement;
   }
 
-  async list(userId: string, collectionId: string) {
+  async list(_userId: string, collectionId: string) {
     const collection = await prisma.collection.findFirst({
-      where: { id: collectionId, ownerId: userId },
+      where: { id: collectionId },
     });
 
     if (!collection) {
