@@ -71,12 +71,17 @@ export function generateAggregatedMetricsCsv(collection: any, metrics: any): str
   lines.push('');
 
   lines.push('MÉTRICAS POR ATENDENTE');
+  const isSeparateQueues = collection.queueMode === 'SEPARATE_QUEUES';
   const attHeaders = [
     'Código',
     'Nome',
+    'Fila',
+    'Chegadas na Fila',
+    'Taxa Chegada Fila (chegadas/min)',
     'Total Entregas',
     'Taxa (entregas/min)',
-    '% do Total',
+    '% do Total Entregas',
+    'Saldo na Fila',
     'Tempo Médio Serviço (s)',
     'Mediana Serviço (s)',
     'Desvio Padrão (s)',
@@ -90,9 +95,13 @@ export function generateAggregatedMetricsCsv(collection: any, metrics: any): str
     const row = [
       att.code,
       att.displayName,
+      att.queueName || (isSeparateQueues ? `Fila ${att.displayName}` : 'Fila Única'),
+      isSeparateQueues ? (att.arrivalsCount ?? 0) : 'Fila Única',
+      isSeparateQueues ? (att.arrivalsPerMinute ?? 'N/A') : '—',
       att.deliveriesCount,
       att.deliveriesPerMinute ?? 'N/A',
       att.percentOfTotalDeliveries + '%',
+      isSeparateQueues ? (att.estimatedQueueRemainder ?? 0) : '—',
       att.serviceTimeSeconds.mean ?? 'N/A',
       att.serviceTimeSeconds.median ?? 'N/A',
       att.serviceTimeSeconds.stdDev ?? 'N/A',
@@ -153,14 +162,19 @@ export function generateCompleteConsolidatedCsv(collection: any, metrics: any, e
   lines.push(['Tempo Médio em Fila Estimado (Wq min)', metrics.queueTheory?.littlesLaw?.WqMinutes ?? 'N/A'].map(esc).join(sep));
   lines.push('');
 
-  lines.push(['2. MÉTRICAS COMPARATIVAS POR ATENDENTE'].map(esc).join(sep));
+  lines.push(['2. MÉTRICAS COMPARATIVAS POR ATENDENTE E FILA'].map(esc).join(sep));
+  const isSeparateQueues = collection.queueMode === 'SEPARATE_QUEUES';
   const attHeaders = [
     'Código Atendente',
     'Nome Atendente',
+    'Fila Associada',
+    'Chegadas na Fila',
+    'Taxa Chegada Fila (/min)',
     'Total Entregas',
-    '% do Total',
+    '% do Total Entregas',
     'Throughput (entregas/min)',
     'Throughput Projetado (entregas/h)',
+    'Saldo na Fila',
     'Tempo Médio Serviço (s)',
     'Mediana Serviço (s)',
     'Desvio Padrão (s)',
@@ -174,10 +188,14 @@ export function generateCompleteConsolidatedCsv(collection: any, metrics: any, e
     lines.push([
       att.code,
       att.displayName,
+      att.queueName || (isSeparateQueues ? `Fila ${att.displayName}` : 'Fila Única'),
+      isSeparateQueues ? (att.arrivalsCount ?? 0) : 'Fila Única',
+      isSeparateQueues ? (att.arrivalsPerMinute ?? 'N/A') : '—',
       att.deliveriesCount,
       att.percentOfTotalDeliveries ? `${att.percentOfTotalDeliveries}%` : '0%',
       att.deliveriesPerMinute ?? 'N/A',
       att.deliveriesPerHour ?? 'N/A',
+      isSeparateQueues ? (att.estimatedQueueRemainder ?? 0) : '—',
       att.serviceTimeSeconds?.mean ?? 'N/A',
       att.serviceTimeSeconds?.median ?? 'N/A',
       att.serviceTimeSeconds?.stdDev ?? 'N/A',

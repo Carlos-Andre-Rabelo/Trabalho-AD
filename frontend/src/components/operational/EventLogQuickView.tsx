@@ -374,7 +374,21 @@ export const EventLogQuickView: React.FC<EventLogQuickViewProps> = ({
                           : 'px-1.5 py-0.5 rounded font-bold text-[10px] bg-blue-100 text-blue-800 uppercase tracking-wide'
                       }
                     >
-                      Chegada de Aluno
+                      {item.attendant
+                        ? `Chegada à Fila ${item.attendant.code}`
+                        : 'Chegada de Aluno'}
+                    </span>
+                  )}
+
+                  {(item.queue || item.attendant) && (
+                    <span
+                      className={
+                        isDark
+                          ? 'font-bold text-slate-200'
+                          : 'font-bold text-slate-800'
+                      }
+                    >
+                      {item.queue?.name || `Fila ${item.attendant?.displayName}`}
                     </span>
                   )}
 
@@ -387,10 +401,6 @@ export const EventLogQuickView: React.FC<EventLogQuickViewProps> = ({
                   >
                     {formatTime(item.occurredAt)}
                   </span>
-
-                  {item.queue && (
-                    <span className="text-slate-400">({item.queue.name})</span>
-                  )}
 
                   {item.isVoided && (
                     <span className="text-rose-500 font-semibold text-[11px]">

@@ -79,6 +79,30 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
     ['Taxa Média de Chegadas (lambda) por Hora', metrics.arrivalMetrics?.arrivalsPerHour ?? 'N/A'],
     ['Throughput Médio Global (X) por Minuto', metrics.overallThroughput?.deliveriesPerMinute ?? 'N/A'],
     ['Throughput Médio Global (X) por Hora', metrics.overallThroughput?.deliveriesPerHour ?? 'N/A'],
+    ...(collection.queueMode === 'SEPARATE_QUEUES' && Array.isArray(metrics.attendantsMetrics)
+      ? [
+          [''],
+          ['3.1. CHEGADAS E SALDO POR FILA INDIVIDUAL (FILAS SEPARADAS)'],
+          ...metrics.attendantsMetrics.flatMap((att: any) => [
+            [
+              `Chegadas à ${att.queueName || `Fila ${att.displayName}`} [${att.code}]`,
+              `${att.arrivalsCount ?? 0} (${att.percentOfTotalArrivals ?? 0}% do total)`,
+            ],
+            [
+              `Taxa de Chegada (lambda_${att.code}) na ${att.queueName || `Fila ${att.displayName}`} (/min)`,
+              att.arrivalsPerMinute ?? 'N/A',
+            ],
+            [
+              `Entregas realizadas por ${att.displayName} [${att.code}]`,
+              att.deliveriesCount ?? 0,
+            ],
+            [
+              `Saldo Líquido na ${att.queueName || `Fila ${att.displayName}`} (Chegadas - Entregas)`,
+              att.estimatedQueueRemainder ?? 0,
+            ],
+          ]),
+        ]
+      : []),
     [''],
     ['4. APLICAÇÃO DA TEORIA DAS FILAS E LEI DE LITTLE'],
     ['Número de Canais / Servidores Ativos (c)', metrics.queueTheory?.c ?? collection.attendants?.length ?? 1],
@@ -109,15 +133,21 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Resumo e Teoria das Filas');
 
   // =========================================================================
-  // ABA 2: MÉTRICAS COMPARATIVAS POR ATENDENTE
+  // ABA 2: MÉTRICAS COMPARATIVAS POR ATENDENTE E FILA
   // =========================================================================
+  const isSeparateQueues = collection.queueMode === 'SEPARATE_QUEUES';
   const attHeaders = [
     'Código Atendente',
     'Nome Atendente',
+    'Fila Associada',
+    'Chegadas na Fila (A)',
+    'Part. Chegadas (%)',
+    'Taxa de Chegada na Fila (/min)',
     'Total de Entregas (N)',
-    'Participação (%)',
+    'Part. Entregas (%)',
     'Throughput (entregas/min)',
     'Throughput Projetado (entregas/h)',
+    'Saldo Líquido na Fila (A - N)',
     'Tempo Médio Serviço (s)',
     'Tempo Médio Serviço (mm:ss)',
     'Mediana do Serviço (s)',
@@ -139,10 +169,15 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
     attRows.push([
       att.code,
       att.displayName,
+      att.queueName || (isSeparateQueues ? `Fila ${att.displayName}` : 'Fila Única Compartilhada'),
+      isSeparateQueues ? (att.arrivalsCount ?? 0) : 'Fila Única',
+      isSeparateQueues ? (att.percentOfTotalArrivals ?? 0) : '—',
+      isSeparateQueues ? (att.arrivalsPerMinute ?? 'N/A') : '—',
       att.deliveriesCount,
       att.percentOfTotalDeliveries ? Number(att.percentOfTotalDeliveries) : 0,
       att.deliveriesPerMinute ?? 'N/A',
       att.deliveriesPerHour ?? (att.deliveriesPerMinute ? Number((att.deliveriesPerMinute * 60).toFixed(1)) : 'N/A'),
+      isSeparateQueues ? (att.estimatedQueueRemainder ?? Math.max(0, (att.arrivalsCount ?? 0) - (att.deliveriesCount ?? 0))) : '—',
       meanSec ?? 'N/A',
       meanSec !== null ? formatDuration(meanSec) : 'N/A',
       att.serviceTimeSeconds?.median ?? 'N/A',
@@ -155,13 +190,20 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
   }
 
   // Linha de total / consolidado
+  const totalArrivalsAll = metrics.arrivalMetrics?.totalArrivals ?? 0;
+  const totalDeliveriesAll = metrics.overallThroughput?.totalDeliveries ?? 0;
   attRows.push([
     'TOTAL GERAL',
     'Todos os Atendentes',
-    metrics.overallThroughput?.totalDeliveries ?? 0,
+    isSeparateQueues ? 'Todas as Filas Separadas' : 'Fila Única Compartilhada',
+    totalArrivalsAll,
+    100,
+    metrics.arrivalMetrics?.arrivalsPerMinute ?? 'N/A',
+    totalDeliveriesAll,
     100,
     metrics.overallThroughput?.deliveriesPerMinute ?? 'N/A',
     metrics.overallThroughput?.deliveriesPerHour ?? 'N/A',
+    Math.max(0, totalArrivalsAll - totalDeliveriesAll),
     '—',
     '—',
     '—',
@@ -175,11 +217,16 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
   const wsAtt = XLSX.utils.aoa_to_sheet([attHeaders, ...attRows]);
   wsAtt['!cols'] = [
     { wch: 18 },
-    { wch: 25 },
+    { wch: 24 },
+    { wch: 26 },
     { wch: 22 },
-    { wch: 16 },
+    { wch: 18 },
+    { wch: 28 },
+    { wch: 22 },
+    { wch: 18 },
     { wch: 24 },
     { wch: 30 },
+    { wch: 26 },
     { wch: 24 },
     { wch: 26 },
     { wch: 22 },
@@ -200,8 +247,11 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
     'Data e Hora Formatada',
     'Tempo Decorrido (segundos)',
     'Tempo Decorrido (mm:ss)',
-    'Intervalo desde Chegada Anterior (segundos)',
-    'Fila',
+    'Fila Registrada',
+    'Código Atendente da Fila',
+    'Nome Atendente da Fila',
+    'Intervalo Global desde Chegada Anterior (s)',
+    'Intervalo na Mesma Fila desde Chegada Anterior (s)',
     'Válido?',
     'Motivo da Anulação',
     'ID Evento',
@@ -210,15 +260,25 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
   const arrivalEvents = (events || []).filter((e) => e.eventType === 'ARRIVAL');
   const arrivalRows: any[][] = [];
   let prevArrivalOccurredMs: number | null = null;
+  const prevQueueArrivalMs: Record<string, number> = {};
   let arrivalCounter = 1;
 
   for (const arr of arrivalEvents) {
     const occurredMs = new Date(arr.occurredAt).getTime();
     const elapsedSec = collectionStartMs ? Math.max(0, Math.floor((occurredMs - collectionStartMs) / 1000)) : 0;
     const interArrivalSec = prevArrivalOccurredMs !== null ? Math.max(0, Math.floor((occurredMs - prevArrivalOccurredMs) / 1000)) : '—';
+    const queueKey = arr.queueId || arr.attendantId || 'GLOBAL';
+    const prevQueueMs = prevQueueArrivalMs[queueKey];
+    const queueInterArrivalSec = prevQueueMs !== undefined ? Math.max(0, Math.floor((occurredMs - prevQueueMs) / 1000)) : '—';
+
     if (!arr.isVoided) {
       prevArrivalOccurredMs = occurredMs;
+      prevQueueArrivalMs[queueKey] = occurredMs;
     }
+
+    const queueLabel =
+      arr.queue?.name ||
+      (arr.attendant ? `Fila ${arr.attendant.displayName}` : isSeparateQueues ? 'Fila Não Especificada' : 'Fila Única Compartilhada');
 
     arrivalRows.push([
       arrivalCounter++,
@@ -226,8 +286,11 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
       formatDate(arr.occurredAt),
       elapsedSec,
       formatDuration(elapsedSec),
+      queueLabel,
+      arr.attendant?.code || '—',
+      arr.attendant?.displayName || '—',
       interArrivalSec,
-      arr.queue?.name || 'Fila Geral',
+      queueInterArrivalSec,
       arr.isVoided ? 'NÃO (ANULADO)' : 'SIM',
       arr.voidReason || '',
       arr.id,
@@ -241,8 +304,11 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
     { wch: 22 },
     { wch: 26 },
     { wch: 24 },
+    { wch: 26 },
+    { wch: 22 },
+    { wch: 24 },
     { wch: 38 },
-    { wch: 18 },
+    { wch: 44 },
     { wch: 18 },
     { wch: 28 },
     { wch: 38 },
@@ -386,30 +452,53 @@ export function generateCollectionExcelBuffer(data: ExcelExportPayload): Buffer 
   if (data.timeline && data.timeline.length > 0) {
     const timelineHeaders = [
       'Janela Temporal',
-      'Chegadas no Intervalo',
-      'Entregas no Intervalo',
+      'Chegadas no Intervalo (Total)',
+      'Entregas no Intervalo (Total)',
       'Saldo Líquido (Chegadas - Entregas)',
-      'Tamanho Estimado da Fila',
-      'Taxa Pontual de Entrega (/min)',
+      'Tamanho Estimado da Fila (Total)',
+      ...attendantsList.flatMap((att: any) =>
+        isSeparateQueues
+          ? [
+              `Chegadas Fila ${att.code}`,
+              `Entregas ${att.code}`,
+              `Fila Estimada ${att.code}`,
+            ]
+          : [`Entregas ${att.code}`]
+      ),
     ];
 
-    const timelineRows = data.timeline.map((item: any) => [
-      item.label || item.timestamp || '—',
-      item.arrivals ?? 0,
-      item.deliveries ?? 0,
-      (item.arrivals ?? 0) - (item.deliveries ?? 0),
-      item.queueLength ?? item.estimatedQueue ?? '—',
-      item.deliveriesPerMinute ?? '—',
-    ]);
+    const timelineRows = data.timeline.map((item: any) => {
+      const deliv = item.totalDeliveries ?? item.deliveries ?? 0;
+      return [
+        item.label || item.timestamp || '—',
+        item.arrivals ?? 0,
+        deliv,
+        (item.arrivals ?? 0) - deliv,
+        item.estimatedQueueLength ?? item.queueLength ?? item.estimatedQueue ?? '—',
+        ...attendantsList.flatMap((att: any) =>
+          isSeparateQueues
+            ? [
+                item[`arrivals_${att.code}`] ?? 0,
+                item[`deliveries_${att.code}`] ?? 0,
+                item[`queue_${att.code}`] ?? 0,
+              ]
+            : [item[`deliveries_${att.code}`] ?? 0]
+        ),
+      ];
+    });
 
     const wsTimeline = XLSX.utils.aoa_to_sheet([timelineHeaders, ...timelineRows]);
     wsTimeline['!cols'] = [
-      { wch: 22 },
-      { wch: 24 },
-      { wch: 24 },
-      { wch: 34 },
-      { wch: 26 },
+      { wch: 20 },
       { wch: 28 },
+      { wch: 28 },
+      { wch: 32 },
+      { wch: 30 },
+      ...attendantsList.flatMap(() =>
+        isSeparateQueues
+          ? [{ wch: 18 }, { wch: 18 }, { wch: 18 }]
+          : [{ wch: 18 }]
+      ),
     ];
     XLSX.utils.book_append_sheet(wb, wsTimeline, 'Série Temporal');
   }

@@ -5,6 +5,8 @@ import {
   reduceLedger,
   selectActiveServices,
   selectArrivals,
+  selectArrivalsByAttendant,
+  selectArrivalsByQueue,
   selectDeliveries,
   selectLogItems,
   LedgerOp,
@@ -293,5 +295,61 @@ describe('Operational Ledger (Estado Derivado e Idempotência)', () => {
     expect(selectActiveServices(state)).toEqual({});
     expect(selectArrivals(state)).toBe(3);
     expect(selectLogItems(state)[0].syncStatus).toBe('rejected');
+  });
+
+  it('contabiliza chegadas individualmente por fila e por atendente em Filas Separadas sem duplicar', () => {
+    let state = createInitialLedgerState();
+    state = reduceLedger(state, {
+      type: 'SNAPSHOT_APPLIED',
+      snapshot: normalizeRawSnapshot(
+        {
+          status: 'IN_PROGRESS',
+          eventCounts: {
+            arrivals: 5,
+            arrivalsByQueue: { 'q-a': 3, 'q-b': 2 },
+            arrivalsByAttendant: { 'att-a': 3, 'att-b': 2 },
+            deliveriesByAttendant: { 'att-a': 2, 'att-b': 1 },
+          },
+          eventStates: [],
+          activeServices: [],
+          recentEvents: [],
+        },
+        1
+      ),
+    });
+
+    expect(selectArrivals(state)).toBe(5);
+    expect(selectArrivalsByQueue(state)).toEqual({ 'q-a': 3, 'q-b': 2 });
+    expect(selectArrivalsByAttendant(state)).toEqual({ 'att-a': 3, 'att-b': 2 });
+
+    // +1 chegada na Fila A e +2 chegadas na Fila B
+    state = reduceLedger(state, {
+      type: 'OP_ENQUEUED',
+      op: {
+        ...makeArrivalOp('arr-a-1', '2026-11-09T12:01:00.000Z'),
+        queueId: 'q-a',
+        attendantId: 'att-a',
+      },
+    });
+    state = reduceLedger(state, {
+      type: 'OP_ENQUEUED',
+      op: {
+        ...makeArrivalOp('arr-b-1', '2026-11-09T12:01:01.000Z'),
+        queueId: 'q-b',
+        attendantId: 'att-b',
+      },
+    });
+    state = reduceLedger(state, {
+      type: 'OP_ENQUEUED',
+      op: {
+        ...makeArrivalOp('arr-b-2', '2026-11-09T12:01:02.000Z'),
+        queueId: 'q-b',
+        attendantId: 'att-b',
+      },
+    });
+
+    expect(selectArrivals(state)).toBe(8);
+    expect(selectArrivalsByQueue(state)).toEqual({ 'q-a': 4, 'q-b': 4 });
+    expect(selectArrivalsByAttendant(state)).toEqual({ 'att-a': 4, 'att-b': 4 });
   });
 });

@@ -35,6 +35,8 @@ export interface ServerSnapshot {
   remainingMs?: number | null;
   serverTime: string;
   arrivals: number;
+  arrivalsByQueue?: Record<string, number>;
+  arrivalsByAttendant?: Record<string, number>;
   deliveriesByAttendant: Record<string, number>;
   eventStates: Record<string, { isVoided: boolean; id: string }>;
   activeServices: Array<{
@@ -51,6 +53,7 @@ export interface PendingVoid {
   eventId: string;
   eventType: 'ARRIVAL' | 'DELIVERY' | 'OBSERVATION';
   attendantId?: string | null;
+  queueId?: string | null;
 }
 
 export interface LedgerState {
@@ -98,6 +101,7 @@ export interface DerivedLogItem {
   durationSeconds?: number;
   attendantId?: string | null;
   attendant?: { code: string; displayName: string } | null;
+  queueId?: string | null;
   queue?: { name: string } | null;
   isVoided: boolean;
   isVoidPending?: boolean;
@@ -157,6 +161,8 @@ export function normalizeRawSnapshot(raw: any, seq: number): ServerSnapshot {
     remainingMs: typeof raw.remainingMs === 'number' ? raw.remainingMs : null,
     serverTime: raw.serverTime || new Date().toISOString(),
     arrivals: Number(raw.eventCounts?.arrivals ?? 0),
+    arrivalsByQueue: { ...(raw.eventCounts?.arrivalsByQueue || {}) },
+    arrivalsByAttendant: { ...(raw.eventCounts?.arrivalsByAttendant || {}) },
     deliveriesByAttendant: { ...(raw.eventCounts?.deliveriesByAttendant || {}) },
     eventStates,
     activeServices: Array.isArray(raw.activeServices) ? raw.activeServices : [],
@@ -378,6 +384,64 @@ export function selectArrivals(state: LedgerState): number {
 }
 
 /**
+ * Total derivado de chegadas por fila (queueId):
+ * Base autoritativa do servidor + chegadas locais ainda não refletidas no snapshot - anulações pendentes.
+ */
+export function selectArrivalsByQueue(state: LedgerState): Record<string, number> {
+  const base = state.snapshot?.arrivalsByQueue ?? {};
+  const eventStates = state.snapshot?.eventStates ?? {};
+  const result: Record<string, number> = { ...base };
+
+  for (const op of state.ops) {
+    if (op.kind !== 'ARRIVAL' || !op.queueId) continue;
+    if (!ACTIVE_OP_STATUSES.has(op.status)) continue;
+    if (state.pendingVoids[op.key]) continue;
+    if (!eventStates[op.key]) {
+      result[op.queueId] = (result[op.queueId] || 0) + 1;
+    }
+  }
+
+  for (const v of Object.values(state.pendingVoids)) {
+    if (v.eventType !== 'ARRIVAL' || !v.queueId) continue;
+    const inServer = eventStates[v.key];
+    if (inServer && !inServer.isVoided) {
+      result[v.queueId] = Math.max(0, (result[v.queueId] || 1) - 1);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Total derivado de chegadas por atendente (attendantId):
+ * Base autoritativa do servidor + chegadas locais atribuídas à fila daquele atendente - anulações pendentes.
+ */
+export function selectArrivalsByAttendant(state: LedgerState): Record<string, number> {
+  const base = state.snapshot?.arrivalsByAttendant ?? {};
+  const eventStates = state.snapshot?.eventStates ?? {};
+  const result: Record<string, number> = { ...base };
+
+  for (const op of state.ops) {
+    if (op.kind !== 'ARRIVAL' || !op.attendantId) continue;
+    if (!ACTIVE_OP_STATUSES.has(op.status)) continue;
+    if (state.pendingVoids[op.key]) continue;
+    if (!eventStates[op.key]) {
+      result[op.attendantId] = (result[op.attendantId] || 0) + 1;
+    }
+  }
+
+  for (const v of Object.values(state.pendingVoids)) {
+    if (v.eventType !== 'ARRIVAL' || !v.attendantId) continue;
+    const inServer = eventStates[v.key];
+    if (inServer && !inServer.isVoided) {
+      result[v.attendantId] = Math.max(0, (result[v.attendantId] || 1) - 1);
+    }
+  }
+
+  return result;
+}
+
+/**
  * Total derivado de entregas por atendente:
  * Base autoritativa do servidor + finalizações locais ainda não no snapshot - anulações pendentes.
  */
@@ -526,6 +590,7 @@ export function selectLogItems(state: LedgerState, limit = 12): DerivedLogItem[]
       attendant:
         serverEv?.attendant ||
         (op.attendant ? { code: op.attendant.code, displayName: op.attendant.displayName } : null),
+      queueId: op.queueId ?? serverEv?.queueId,
       queue: serverEv?.queue || (op.queueName ? { name: op.queueName } : null),
       isVoided,
       isVoidPending: voidPending,
@@ -557,6 +622,7 @@ export function selectLogItems(state: LedgerState, limit = 12): DerivedLogItem[]
       durationSeconds,
       attendantId: ev.attendantId,
       attendant: ev.attendant || null,
+      queueId: ev.queueId,
       queue: ev.queue || null,
       isVoided,
       isVoidPending: voidPending,

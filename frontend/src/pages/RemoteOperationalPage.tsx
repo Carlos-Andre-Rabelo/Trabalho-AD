@@ -55,6 +55,8 @@ export const RemoteOperationalPage: React.FC = () => {
     reloadInitialData,
     isConnected,
     totalArrivals,
+    arrivalsByQueue,
+    arrivalsByAttendant,
     deliveriesByAttendant,
     activeServicesByAttendant,
     logItems,
@@ -92,14 +94,18 @@ export const RemoteOperationalPage: React.FC = () => {
     }
   };
 
-  const handleRegisterArrival = () => {
+  const handleRegisterArrival = (queueId?: string, attendantId?: string) => {
     if (!collection || collection.status !== 'IN_PROGRESS') return;
     triggerSensoryFeedback('arrival');
-    registerArrival(undefined, {
-      remote: true,
-      device: 'mobile',
-      aferidor: aferidorLabel,
-    });
+    registerArrival(
+      queueId,
+      {
+        remote: true,
+        device: 'mobile',
+        aferidor: aferidorLabel,
+      },
+      attendantId
+    );
   };
 
   const handleStartService = (attendantId: string) => {
@@ -358,23 +364,64 @@ export const RemoteOperationalPage: React.FC = () => {
 
       {/* Botões de Registro Livres e Instantâneos */}
       <main className="mx-4 mt-3 flex-1 space-y-2.5">
-        {(selectedFocus === 'all' || selectedFocus === 'arrivals') && (
-          <button
-            onClick={handleRegisterArrival}
-            disabled={!isCollectionActive}
-            className={`w-full ${
-              selectedFocus === 'arrivals' ? 'h-52' : 'h-24'
-            } rounded-lg p-3 flex flex-col justify-center items-center text-center transition-transform active:scale-95 ${
-              isCollectionActive
-                ? 'bg-blue-600 active:bg-blue-700 text-white'
-                : 'bg-slate-800 text-slate-500 cursor-not-allowed'
-            }`}
-          >
-            <span className="text-xl font-bold">+1 CHEGADA</span>
-            <span className="text-xs text-blue-100 mt-0.5 font-mono">
-              Total: {totalArrivals}
-            </span>
-          </button>
+        {collection.queueMode === 'SEPARATE_QUEUES' ? (
+          collection.attendants.map((att, idx) => {
+            if (selectedFocus !== 'all' && selectedFocus !== 'arrivals' && selectedFocus !== att.id) {
+              return null;
+            }
+            const dedicatedQueue =
+              collection.queues?.find(
+                (q) => q.attendants?.length === 1 && q.attendants[0].attendantId === att.id
+              ) ||
+              collection.queues?.find((q) =>
+                q.name.toLowerCase().includes(att.displayName.toLowerCase())
+              ) ||
+              collection.queues?.[idx];
+            const qId = dedicatedQueue?.id;
+            const attArrivals =
+              arrivalsByAttendant[att.id] ?? (qId ? arrivalsByQueue[qId] ?? 0 : 0);
+
+            return (
+              <button
+                key={`arr-${att.id}`}
+                onClick={() => handleRegisterArrival(qId, att.id)}
+                disabled={!isCollectionActive}
+                className={`w-full ${
+                  selectedFocus === 'arrivals' ? 'h-32' : 'h-20'
+                } rounded-lg p-3 flex flex-col justify-center items-center text-center transition-transform active:scale-95 ${
+                  isCollectionActive
+                    ? 'bg-blue-600 active:bg-blue-700 text-white'
+                    : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                }`}
+              >
+                <span className="text-lg font-bold">
+                  +1 CHEGADA À FILA {att.code} ({att.displayName})
+                </span>
+                <span className="text-xs text-blue-100 mt-0.5 font-mono">
+                  Chegadas Fila {att.code}: {attArrivals}
+                </span>
+              </button>
+            );
+          })
+        ) : (
+          (selectedFocus === 'all' || selectedFocus === 'arrivals') && (
+            <button
+              onClick={() => handleRegisterArrival(collection.queues?.[0]?.id)}
+              disabled={!isCollectionActive}
+              className={`w-full ${
+                selectedFocus === 'arrivals' ? 'h-52' : 'h-24'
+              } rounded-lg p-3 flex flex-col justify-center items-center text-center transition-transform active:scale-95 ${
+                isCollectionActive
+                  ? 'bg-blue-600 active:bg-blue-700 text-white'
+                  : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+              }`}
+            >
+              <span className="text-xl font-bold">+1 CHEGADA (FILA ÚNICA)</span>
+              <span className="text-xs text-blue-100 mt-0.5 font-mono">
+                Total: {totalArrivals}
+              </span>
+            </button>
+          )
         )}
 
         {collection.attendants.map((att) => {

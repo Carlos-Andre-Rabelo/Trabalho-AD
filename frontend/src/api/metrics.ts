@@ -35,11 +35,34 @@ export interface CollectionMetricsResponse {
       totalArrivals: number;
       arrivalsPerMinute: number | null;
       arrivalsPerHour: number | null;
+      unassignedArrivals?: number;
     };
+    queuesMetrics?: Array<{
+      queueId: string;
+      queueName: string;
+      attendantId: string | null;
+      attendantCode: string | null;
+      attendantName: string | null;
+      arrivalsCount: number;
+      arrivalsPerMinute: number | null;
+      arrivalsPerHour: number | null;
+      percentOfTotalArrivals: number;
+      deliveriesCount: number;
+      estimatedQueueRemainder: number;
+      trafficIntensityRho: number | null;
+    }>;
     attendantsMetrics: Array<{
       attendantId: string;
       code: string;
       displayName: string;
+      queueId?: string | null;
+      queueName?: string | null;
+      arrivalsCount?: number;
+      arrivalsPerMinute?: number | null;
+      arrivalsPerHour?: number | null;
+      percentOfTotalArrivals?: number;
+      estimatedQueueRemainder?: number;
+      trafficIntensityRho?: number | null;
       deliveriesCount: number;
       deliveriesPerMinute: number | null;
       deliveriesPerHour: number | null;

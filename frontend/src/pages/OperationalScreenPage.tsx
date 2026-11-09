@@ -48,6 +48,8 @@ export const OperationalScreenPage: React.FC = () => {
     connectedClients,
     pollNow,
     totalArrivals,
+    arrivalsByQueue,
+    arrivalsByAttendant,
     deliveriesByAttendant,
     activeServicesByAttendant,
     logItems,
@@ -349,13 +351,26 @@ export const OperationalScreenPage: React.FC = () => {
         </div>
       )}
 
-      {/* Botão de Chegada Instantâneo (exibido apenas em 'all' ou 'arrivals') */}
-      {(selectedFocus === 'all' || selectedFocus === 'arrivals') && (
+      {/* Botões de Chegada Instantâneos (por fila individual em Filas Separadas ou geral em Fila Única) */}
+      {(selectedFocus === 'all' ||
+        selectedFocus === 'arrivals' ||
+        collection.queueMode === 'SEPARATE_QUEUES') && (
         <ArrivalButton
           totalArrivals={totalArrivals}
-          onRegisterArrival={(queueId) => registerArrival(queueId)}
+          arrivalsByQueue={arrivalsByQueue}
+          arrivalsByAttendant={arrivalsByAttendant}
+          onRegisterArrival={(queueId, attendantId) =>
+            registerArrival(queueId, undefined, attendantId)
+          }
           isCollectionActive={isCollectionActive}
+          queueMode={collection.queueMode}
+          attendants={collection.attendants}
           queues={collection.queues}
+          focusedAttendantId={
+            selectedFocus !== 'all' && selectedFocus !== 'arrivals'
+              ? selectedFocus
+              : null
+          }
         />
       )}
 

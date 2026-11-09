@@ -70,9 +70,16 @@ export const CollectionDetailsPage: React.FC = () => {
             <ArrowLeft className="w-4 h-4" />
           </Link>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-lg font-bold text-slate-900">{collection.title}</h1>
               <Badge status={collection.status} />
+              <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-bold uppercase tracking-wide">
+                {collection.queueMode === 'SEPARATE_QUEUES'
+                  ? 'Filas Separadas'
+                  : collection.queueMode === 'SINGLE_QUEUE'
+                  ? 'Fila Única'
+                  : 'Personalizado'}
+              </span>
             </div>
             <div className="text-xs text-slate-500">
               {collection.owner?.name || 'Aferidor'} • {formatDateTime(collection.startedAt)}
@@ -156,9 +163,58 @@ export const CollectionDetailsPage: React.FC = () => {
         />
       </div>
 
+      {collection.queueMode === 'SEPARATE_QUEUES' && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {metrics.attendantsMetrics.map((att) => (
+            <div
+              key={`queue-summary-${att.attendantId}`}
+              className="bg-white rounded-lg border border-blue-200 p-3.5 shadow-sm flex items-center justify-between gap-3"
+            >
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="px-1.5 py-0.5 rounded bg-blue-600 text-white text-[10px] font-bold">
+                    Fila {att.code}
+                  </span>
+                  <span className="text-xs font-bold text-slate-900">
+                    {att.queueName || `Fila ${att.displayName}`}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-1 flex items-center gap-3">
+                  <span>
+                    Taxa Chegada (λ_{att.code}):{' '}
+                    <strong className="text-slate-800">{att.arrivalsPerMinute ?? '—'}/min</strong>
+                  </span>
+                  <span>
+                    Entregas:{' '}
+                    <strong className="text-emerald-700">{att.deliveriesCount}</strong>
+                  </span>
+                  <span>
+                    Saldo Fila:{' '}
+                    <strong className="text-amber-700">{att.estimatedQueueRemainder ?? 0}</strong>
+                  </span>
+                </div>
+              </div>
+
+              <div className="text-right shrink-0">
+                <div className="text-xl font-bold font-mono text-blue-700">
+                  {att.arrivalsCount ?? 0}
+                </div>
+                <div className="text-[10px] text-slate-400 uppercase font-semibold">
+                  Chegadas ({att.percentOfTotalArrivals ?? 0}%)
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <Card>
         <div className="flex items-center justify-between pb-2.5 border-b border-slate-100 mb-3">
-          <h2 className="text-xs font-bold uppercase text-slate-500">Atendentes</h2>
+          <h2 className="text-xs font-bold uppercase text-slate-500">
+            {collection.queueMode === 'SEPARATE_QUEUES'
+              ? 'Atendentes e Filas Individuais'
+              : 'Atendentes'}
+          </h2>
           <Link to={`/coletas/${id}/eventos`} className="text-xs text-blue-600 hover:underline">
             Histórico de Eventos
           </Link>
@@ -168,10 +224,19 @@ export const CollectionDetailsPage: React.FC = () => {
           <table className="w-full text-xs text-left">
             <thead className="bg-slate-50 text-slate-500 uppercase font-semibold border-b border-slate-200">
               <tr>
-                <th className="py-2 px-3">Atendente</th>
+                <th className="py-2 px-3">Atendente / Fila</th>
+                {collection.queueMode === 'SEPARATE_QUEUES' && (
+                  <>
+                    <th className="py-2 px-3 text-right">Chegadas Fila</th>
+                    <th className="py-2 px-3 text-right">λ Fila (/min)</th>
+                  </>
+                )}
                 <th className="py-2 px-3 text-right">Entregas</th>
                 <th className="py-2 px-3 text-right">Taxa (/min)</th>
-                <th className="py-2 px-3 text-right">%</th>
+                <th className="py-2 px-3 text-right">% Entregas</th>
+                {collection.queueMode === 'SEPARATE_QUEUES' && (
+                  <th className="py-2 px-3 text-right">Saldo Fila</th>
+                )}
                 <th className="py-2 px-3 text-right">Média (s)</th>
                 <th className="py-2 px-3 text-right">Utilização</th>
               </tr>
@@ -182,15 +247,33 @@ export const CollectionDetailsPage: React.FC = () => {
                   <td className="py-2.5 px-3 font-bold text-slate-900">
                     [{att.code}] {att.displayName}
                   </td>
+                  {collection.queueMode === 'SEPARATE_QUEUES' && (
+                    <>
+                      <td className="py-2.5 px-3 text-right font-bold text-blue-700 font-mono">
+                        {att.arrivalsCount ?? 0}{' '}
+                        <span className="text-[10px] font-normal text-slate-400">
+                          ({att.percentOfTotalArrivals ?? 0}%)
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-blue-600 font-semibold">
+                        {att.arrivalsPerMinute ?? '—'}
+                      </td>
+                    </>
+                  )}
                   <td className="py-2.5 px-3 text-right font-bold text-slate-900">
                     {att.deliveriesCount}
                   </td>
-                  <td className="py-2.5 px-3 text-right text-blue-600 font-semibold">
+                  <td className="py-2.5 px-3 text-right text-emerald-700 font-semibold">
                     {att.deliveriesPerMinute ?? '—'}
                   </td>
                   <td className="py-2.5 px-3 text-right text-slate-600">
                     {att.percentOfTotalDeliveries}%
                   </td>
+                  {collection.queueMode === 'SEPARATE_QUEUES' && (
+                    <td className="py-2.5 px-3 text-right font-mono font-bold text-amber-700">
+                      {att.estimatedQueueRemainder ?? 0}
+                    </td>
+                  )}
                   <td className="py-2.5 px-3 text-right font-mono text-slate-900">
                     {att.serviceTimeSeconds.mean !== null ? `${att.serviceTimeSeconds.mean}s` : '—'}
                   </td>

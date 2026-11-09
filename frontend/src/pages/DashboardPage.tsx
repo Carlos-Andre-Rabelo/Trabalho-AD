@@ -97,9 +97,16 @@ export const DashboardPage: React.FC = () => {
                 className="bg-white rounded-lg border border-slate-200 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
               >
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-bold text-slate-900 text-sm">{col.title}</span>
                     <Badge status={col.status} />
+                    <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
+                      {col.queueMode === 'SEPARATE_QUEUES'
+                        ? 'Filas Separadas'
+                        : col.queueMode === 'SINGLE_QUEUE'
+                        ? 'Fila Única'
+                        : 'Personalizado'}
+                    </span>
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">
                     {col.owner?.name || 'Aferidor'} • {formatDate(col.createdAt)} • {col._count?.events || 0} eventos

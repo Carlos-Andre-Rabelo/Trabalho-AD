@@ -92,11 +92,34 @@ export interface CollectionCalculatedMetrics {
     totalArrivals: number; // A
     arrivalsPerMinute: number | null; // lambda (min)
     arrivalsPerHour: number | null; // lambda (hora)
+    unassignedArrivals?: number;
   };
+  queuesMetrics?: Array<{
+    queueId: string;
+    queueName: string;
+    attendantId: string | null;
+    attendantCode: string | null;
+    attendantName: string | null;
+    arrivalsCount: number;
+    arrivalsPerMinute: number | null;
+    arrivalsPerHour: number | null;
+    percentOfTotalArrivals: number;
+    deliveriesCount: number;
+    estimatedQueueRemainder: number;
+    trafficIntensityRho: number | null;
+  }>;
   attendantsMetrics: Array<{
     attendantId: string;
     code: string;
     displayName: string;
+    queueId?: string | null;
+    queueName?: string | null;
+    arrivalsCount?: number;
+    arrivalsPerMinute?: number | null;
+    arrivalsPerHour?: number | null;
+    percentOfTotalArrivals?: number;
+    estimatedQueueRemainder?: number;
+    trafficIntensityRho?: number | null;
     deliveriesCount: number;
     deliveriesPerMinute: number | null;
     deliveriesPerHour: number | null;
@@ -145,12 +168,14 @@ export interface CalculateMetricsInput {
   startedAt: Date | null;
   endedAt: Date | null;
   currentStatus: string;
+  queueMode?: string;
   now?: Date;
   pauses: Array<{ startedAt: Date; endedAt: Date | null }>;
   events: Array<{
     id: string;
     eventType: 'ARRIVAL' | 'DELIVERY' | 'OBSERVATION';
     attendantId: string | null;
+    queueId?: string | null;
     isVoided: boolean;
     occurredAt: Date;
   }>;
@@ -167,6 +192,11 @@ export interface CalculateMetricsInput {
     code: string;
     displayName: string;
   }>;
+  queues?: Array<{
+    id: string;
+    name: string;
+    attendants?: Array<{ attendantId: string }>;
+  }>;
   proteinMeasurements: Array<{
     amount: number;
     unit: string;
@@ -179,11 +209,13 @@ export function computeCollectionMetrics(input: CalculateMetricsInput): Collecti
     startedAt,
     endedAt,
     currentStatus,
+    queueMode,
     now = new Date(),
     pauses,
     events,
     serviceIntervals,
     attendants,
+    queues = [],
     proteinMeasurements,
   } = input;
 
@@ -232,14 +264,35 @@ export function computeCollectionMetrics(input: CalculateMetricsInput): Collecti
     limitations.push('Nenhuma chegada de estudante foi registrada nesta coleta. Taxa de chegada é desconhecida.');
   }
 
-  // 5. Métricas por Atendente
-  const attendantsMetrics = attendants.map((attendant) => {
+  // 5. Métricas por Atendente e por Fila Individual
+  const attendantsMetrics = attendants.map((attendant, idx) => {
     const attDeliveries = deliveryEvents.filter((e) => e.attendantId === attendant.id);
     const count = attDeliveries.length;
 
     const attDpm = operationalDurationMinutes > 0 ? Number((count / operationalDurationMinutes).toFixed(2)) : null;
     const attDph = operationalDurationHours > 0 ? Number((count / operationalDurationHours).toFixed(2)) : null;
     const percentOfTotal = totalDeliveries > 0 ? Number(((count / totalDeliveries) * 100).toFixed(1)) : 0;
+
+    // Identifica a fila dedicada a este atendente (quando SEPARATE_QUEUES ou fila com 1 atendente)
+    const dedicatedQueue =
+      queues.find((q) => q.attendants?.length === 1 && q.attendants[0].attendantId === attendant.id) ||
+      (queueMode === 'SEPARATE_QUEUES'
+        ? queues.find((q) => q.name.toLowerCase().includes(attendant.displayName.toLowerCase())) || queues[idx]
+        : undefined);
+
+    const attArrivals = arrivalEvents.filter(
+      (e) =>
+        e.attendantId === attendant.id ||
+        (dedicatedQueue && e.queueId === dedicatedQueue.id)
+    ).length;
+
+    const attArrivalsPerMin =
+      operationalDurationMinutes > 0 ? Number((attArrivals / operationalDurationMinutes).toFixed(2)) : null;
+    const attArrivalsPerHour =
+      operationalDurationHours > 0 ? Number((attArrivals / operationalDurationHours).toFixed(2)) : null;
+    const percentOfTotalArrivals =
+      totalArrivals > 0 ? Number(((attArrivals / totalArrivals) * 100).toFixed(1)) : 0;
+    const estimatedQueueRemainder = Math.max(0, attArrivals - count);
 
     // Intervalos de serviço cronometrados deste atendente
     const completedIntervals = serviceIntervals.filter(
@@ -258,10 +311,26 @@ export function computeCollectionMetrics(input: CalculateMetricsInput): Collecti
         ? Number(Math.min(100, (busyDurationSeconds / operationalDurationSeconds) * 100).toFixed(1))
         : null;
 
+    // Intensidade de tráfego individual rho_i = lambda_i / mu_i
+    const muFromMean =
+      serviceTimeSummary.mean && serviceTimeSummary.mean > 0 ? 60 / serviceTimeSummary.mean : attDpm;
+    const trafficIntensityRho =
+      attArrivalsPerMin !== null && muFromMean && muFromMean > 0
+        ? Number((attArrivalsPerMin / muFromMean).toFixed(2))
+        : null;
+
     return {
       attendantId: attendant.id,
       code: attendant.code,
       displayName: attendant.displayName,
+      queueId: dedicatedQueue?.id ?? null,
+      queueName: dedicatedQueue?.name ?? (queueMode === 'SEPARATE_QUEUES' ? `Fila ${attendant.displayName}` : null),
+      arrivalsCount: attArrivals,
+      arrivalsPerMinute: attArrivalsPerMin,
+      arrivalsPerHour: attArrivalsPerHour,
+      percentOfTotalArrivals,
+      estimatedQueueRemainder,
+      trafficIntensityRho,
       deliveriesCount: count,
       deliveriesPerMinute: attDpm,
       deliveriesPerHour: attDph,
@@ -271,6 +340,35 @@ export function computeCollectionMetrics(input: CalculateMetricsInput): Collecti
       utilizationPercent,
     };
   });
+
+  const queuesMetrics = queues.map((q) => {
+    const singleAttId = q.attendants?.length === 1 ? q.attendants[0].attendantId : null;
+    const attMetric = singleAttId ? attendantsMetrics.find((a) => a.attendantId === singleAttId) : undefined;
+    const qArrivals = arrivalEvents.filter(
+      (e) => e.queueId === q.id || (singleAttId && e.attendantId === singleAttId && !e.queueId)
+    ).length;
+    const qDeliveries = singleAttId ? attMetric?.deliveriesCount ?? 0 : totalDeliveries;
+
+    return {
+      queueId: q.id,
+      queueName: q.name,
+      attendantId: attMetric?.attendantId ?? null,
+      attendantCode: attMetric?.code ?? null,
+      attendantName: attMetric?.displayName ?? null,
+      arrivalsCount: qArrivals,
+      arrivalsPerMinute:
+        operationalDurationMinutes > 0 ? Number((qArrivals / operationalDurationMinutes).toFixed(2)) : null,
+      arrivalsPerHour:
+        operationalDurationHours > 0 ? Number((qArrivals / operationalDurationHours).toFixed(2)) : null,
+      percentOfTotalArrivals: totalArrivals > 0 ? Number(((qArrivals / totalArrivals) * 100).toFixed(1)) : 0,
+      deliveriesCount: qDeliveries,
+      estimatedQueueRemainder: Math.max(0, qArrivals - qDeliveries),
+      trafficIntensityRho: attMetric?.trafficIntensityRho ?? null,
+    };
+  });
+
+  const assignedArrivalsSum = attendantsMetrics.reduce((acc, a) => acc + (a.arrivalsCount || 0), 0);
+  const unassignedArrivals = Math.max(0, totalArrivals - assignedArrivalsSum);
 
   // 6. Comparação entre Atendentes (com Ressalva Metodológica)
   let comparison = {
@@ -389,7 +487,9 @@ export function computeCollectionMetrics(input: CalculateMetricsInput): Collecti
       totalArrivals,
       arrivalsPerMinute,
       arrivalsPerHour,
+      unassignedArrivals,
     },
+    queuesMetrics,
     attendantsMetrics,
     comparison,
     queueTheory,

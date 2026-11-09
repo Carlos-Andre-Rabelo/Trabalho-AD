@@ -153,12 +153,18 @@ export const ReportsPage: React.FC = () => {
         {/* Tabela de Indicadores por Atendente */}
         <div>
           <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800 border-b border-slate-200 pb-1 mb-3">
-            2. Métricas de Throughput e Atendimento
+            2. Métricas de Chegada, Throughput e Atendimento por Servidor
           </h2>
           <table className="w-full text-xs text-left border border-slate-200">
             <thead className="bg-slate-100 text-slate-700 uppercase font-semibold">
               <tr>
-                <th className="p-2.5 border-b">Atendente</th>
+                <th className="p-2.5 border-b">Atendente / Fila</th>
+                {collection.queueMode === 'SEPARATE_QUEUES' && (
+                  <>
+                    <th className="p-2.5 border-b text-right">Chegadas Fila (A)</th>
+                    <th className="p-2.5 border-b text-right">λ Fila (/min)</th>
+                  </>
+                )}
                 <th className="p-2.5 border-b text-right">Entregas (N)</th>
                 <th className="p-2.5 border-b text-right">Throughput (X/min)</th>
                 <th className="p-2.5 border-b text-right">Proporção</th>
@@ -170,7 +176,19 @@ export const ReportsPage: React.FC = () => {
             <tbody className="divide-y divide-slate-200">
               {metrics.attendantsMetrics.map((att) => (
                 <tr key={att.attendantId}>
-                  <td className="p-2.5 font-bold">[{att.code}] {att.displayName}</td>
+                  <td className="p-2.5 font-bold">
+                    [{att.code}] {att.displayName}
+                  </td>
+                  {collection.queueMode === 'SEPARATE_QUEUES' && (
+                    <>
+                      <td className="p-2.5 text-right font-black text-blue-700">
+                        {att.arrivalsCount ?? 0} ({att.percentOfTotalArrivals ?? 0}%)
+                      </td>
+                      <td className="p-2.5 text-right font-bold text-blue-700">
+                        {att.arrivalsPerMinute ?? '—'}
+                      </td>
+                    </>
+                  )}
                   <td className="p-2.5 text-right font-black">{att.deliveriesCount}</td>
                   <td className="p-2.5 text-right font-bold text-blue-900">{att.deliveriesPerMinute ?? '—'}</td>
                   <td className="p-2.5 text-right">{att.percentOfTotalDeliveries}%</td>
@@ -181,6 +199,12 @@ export const ReportsPage: React.FC = () => {
               ))}
               <tr className="bg-slate-50 font-black">
                 <td className="p-2.5">Agregado Total</td>
+                {collection.queueMode === 'SEPARATE_QUEUES' && (
+                  <>
+                    <td className="p-2.5 text-right text-blue-800">{metrics.arrivalMetrics.totalArrivals}</td>
+                    <td className="p-2.5 text-right text-blue-800">{metrics.arrivalMetrics.arrivalsPerMinute ?? '—'}</td>
+                  </>
+                )}
                 <td className="p-2.5 text-right">{metrics.overallThroughput.totalDeliveries}</td>
                 <td className="p-2.5 text-right text-blue-950">{metrics.overallThroughput.deliveriesPerMinute ?? '—'}</td>
                 <td className="p-2.5 text-right">100%</td>

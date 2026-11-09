@@ -12,6 +12,12 @@ export class MetricsService {
       include: {
         owner: { select: { id: true, name: true, email: true } },
         attendants: { orderBy: { code: 'asc' } },
+        queues: {
+          include: {
+            attendants: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        },
         pauses: { orderBy: { startedAt: 'asc' } },
         proteinMeasurements: true,
       },
@@ -28,6 +34,7 @@ export class MetricsService {
           id: true,
           eventType: true,
           attendantId: true,
+          queueId: true,
           isVoided: true,
           occurredAt: true,
         },
@@ -49,10 +56,12 @@ export class MetricsService {
       startedAt: collection.startedAt,
       endedAt: collection.endedAt,
       currentStatus: collection.status,
+      queueMode: collection.queueMode,
       pauses: collection.pauses,
       events,
       serviceIntervals,
       attendants: collection.attendants,
+      queues: collection.queues,
       proteinMeasurements: collection.proteinMeasurements,
     });
 
@@ -69,6 +78,8 @@ export class MetricsService {
         location: collection.location,
         timezone: collection.timezone,
         owner: (collection as any).owner,
+        attendants: collection.attendants,
+        queues: collection.queues,
         notes: notesText,
         targetDurationMinutes,
       },
@@ -79,7 +90,13 @@ export class MetricsService {
   async getTimelineData(_userId: string, collectionId: string, bucketMinutes = 5) {
     const collection = await prisma.collection.findFirst({
       where: { id: collectionId },
-      include: { attendants: { orderBy: { code: 'asc' } } },
+      include: {
+        attendants: { orderBy: { code: 'asc' } },
+        queues: {
+          include: { attendants: true },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
     });
 
     if (!collection) {
@@ -89,7 +106,7 @@ export class MetricsService {
     const events = await prisma.event.findMany({
       where: { collectionId, isVoided: false },
       orderBy: { occurredAt: 'asc' },
-      include: { attendant: true },
+      include: { attendant: true, queue: true },
     });
 
     if (events.length === 0 || !collection.startedAt) {
@@ -114,6 +131,20 @@ export class MetricsService {
     let currentBucketStart = startTime;
     let cumArrivals = 0;
     let cumDeliveries = 0;
+    const cumArrivalsByAtt: Record<string, number> = {};
+    const cumDeliveriesByAtt: Record<string, number> = {};
+
+    const attQueueMap: Record<string, string | undefined> = {};
+    collection.attendants.forEach((att, idx) => {
+      cumArrivalsByAtt[att.id] = 0;
+      cumDeliveriesByAtt[att.id] = 0;
+      const dedicatedQueue =
+        collection.queues.find((q) => q.attendants?.length === 1 && q.attendants[0].attendantId === att.id) ||
+        (collection.queueMode === 'SEPARATE_QUEUES'
+          ? collection.queues.find((q) => q.name.toLowerCase().includes(att.displayName.toLowerCase())) || collection.queues[idx]
+          : undefined);
+      attQueueMap[att.id] = dedicatedQueue?.id;
+    });
 
     while (currentBucketStart <= endTime) {
       const currentBucketEnd = currentBucketStart + bucketMs;
@@ -143,9 +174,20 @@ export class MetricsService {
       };
 
       for (const att of collection.attendants) {
-        bucketData[`deliveries_${att.code}`] = bucketEvents.filter(
+        const qId = attQueueMap[att.id];
+        const attArrivalsInBucket = bucketEvents.filter(
+          (e) => e.eventType === 'ARRIVAL' && (e.attendantId === att.id || (qId && e.queueId === qId))
+        ).length;
+        const attDeliveriesInBucket = bucketEvents.filter(
           (e) => e.eventType === 'DELIVERY' && e.attendantId === att.id
         ).length;
+
+        cumArrivalsByAtt[att.id] += attArrivalsInBucket;
+        cumDeliveriesByAtt[att.id] += attDeliveriesInBucket;
+
+        bucketData[`arrivals_${att.code}`] = attArrivalsInBucket;
+        bucketData[`deliveries_${att.code}`] = attDeliveriesInBucket;
+        bucketData[`queue_${att.code}`] = Math.max(0, cumArrivalsByAtt[att.id] - cumDeliveriesByAtt[att.id]);
       }
 
       buckets.push(bucketData);

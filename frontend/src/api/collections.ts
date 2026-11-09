@@ -12,6 +12,10 @@ export interface Attendant {
 export interface Queue {
   id: string;
   name: string;
+  attendants?: Array<{
+    attendantId: string;
+    attendant?: Attendant;
+  }>;
 }
 
 export interface Collection {
@@ -47,6 +51,8 @@ export interface Collection {
   };
   eventCounts?: {
     arrivals: number;
+    arrivalsByQueue?: Record<string, number>;
+    arrivalsByAttendant?: Record<string, number>;
     deliveriesByAttendant: Record<string, number>;
   };
 }

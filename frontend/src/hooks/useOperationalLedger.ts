@@ -11,6 +11,8 @@ import {
   reduceLedger,
   selectActiveServices,
   selectArrivals,
+  selectArrivalsByAttendant,
+  selectArrivalsByQueue,
   selectDeliveries,
   selectLogItems,
 } from '../operational/ledger.js';
@@ -225,6 +227,7 @@ export function useOperationalLedger({
             if (op.kind === 'ARRIVAL') {
               const created = await eventsApi.create(collectionId, {
                 eventType: 'ARRIVAL',
+                attendantId: op.attendantId,
                 queueId: op.queueId,
                 idempotencyKey: op.key,
                 occurredAt: op.occurredAt,
@@ -374,7 +377,7 @@ export function useOperationalLedger({
   }, [enqueueAttendantOp, executeOp]);
 
   const registerArrival = useCallback(
-    (queueId?: string, extraMetadata?: Record<string, any>) => {
+    (queueId?: string, extraMetadata?: Record<string, any>, attendantId?: string) => {
       const col = collectionRef.current;
       if (!collectionId || !col || col.status !== 'IN_PROGRESS' || stateRef.current.closed) {
         return;
@@ -382,14 +385,55 @@ export function useOperationalLedger({
 
       const key = `arr-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
       const occurredAt = serverNowIso();
-      const queueObj = queueId ? col.queues?.find((q) => q.id === queueId) : undefined;
+
+      let resolvedQueueId = queueId;
+      let resolvedAttendantId = attendantId;
+
+      let queueObj = resolvedQueueId ? col.queues?.find((q) => q.id === resolvedQueueId) : undefined;
+
+      if (!queueObj && resolvedAttendantId && col.queues) {
+        const attForMatch = col.attendants.find((a) => a.id === resolvedAttendantId);
+        queueObj =
+          col.queues.find((q) => q.attendants?.some((qa) => qa.attendantId === resolvedAttendantId)) ||
+          (attForMatch
+            ? col.queues.find((q) => q.name.toLowerCase().includes(attForMatch.displayName.toLowerCase()))
+            : undefined);
+        if (queueObj) {
+          resolvedQueueId = queueObj.id;
+        }
+      }
+
+      if (queueObj && !resolvedAttendantId) {
+        if (queueObj.attendants && queueObj.attendants.length === 1) {
+          resolvedAttendantId = queueObj.attendants[0].attendantId;
+        } else if (col.queueMode === 'SEPARATE_QUEUES') {
+          const matchedAtt = col.attendants.find((a) =>
+            queueObj!.name.toLowerCase().includes(a.displayName.toLowerCase())
+          );
+          if (matchedAtt) resolvedAttendantId = matchedAtt.id;
+        }
+      }
+
+      if (!queueObj && !resolvedQueueId && col.queueMode === 'SINGLE_QUEUE' && col.queues?.length === 1) {
+        queueObj = col.queues[0];
+        resolvedQueueId = queueObj.id;
+      }
+
+      const attObj = resolvedAttendantId
+        ? col.attendants.find((a) => a.id === resolvedAttendantId)
+        : undefined;
+
+      const resolvedQueueName =
+        queueObj?.name || (attObj && col.queueMode === 'SEPARATE_QUEUES' ? `Fila ${attObj.displayName}` : undefined);
 
       const op: LedgerOp = {
         key,
         kind: 'ARRIVAL',
         collectionId,
-        queueId,
-        queueName: queueObj?.name,
+        attendantId: resolvedAttendantId,
+        attendant: attObj ? { id: attObj.id, code: attObj.code, displayName: attObj.displayName } : undefined,
+        queueId: resolvedQueueId,
+        queueName: resolvedQueueName,
         occurredAt,
         status: 'sending',
         retryCount: 0,
@@ -499,7 +543,16 @@ export function useOperationalLedger({
   }, []);
 
   const voidEvent = useCallback(
-    async (item: { key: string; eventId?: string; kind: 'ARRIVAL' | 'DELIVERY' | 'SERVICE_START'; attendantId?: string | null }, reason: string) => {
+    async (
+      item: {
+        key: string;
+        eventId?: string;
+        kind: 'ARRIVAL' | 'DELIVERY' | 'SERVICE_START';
+        attendantId?: string | null;
+        queueId?: string | null;
+      },
+      reason: string
+    ) => {
       if (!collectionId) return;
       if (!item.eventId) {
         dispatch({ type: 'OP_DISMISSED', key: item.key });
@@ -513,6 +566,7 @@ export function useOperationalLedger({
           eventId: item.eventId,
           eventType: item.kind === 'ARRIVAL' ? 'ARRIVAL' : 'DELIVERY',
           attendantId: item.attendantId,
+          queueId: item.queueId,
         },
       });
 
@@ -537,6 +591,8 @@ export function useOperationalLedger({
   }, [pollNow]);
 
   const totalArrivals = useMemo(() => selectArrivals(state), [state]);
+  const arrivalsByQueue = useMemo(() => selectArrivalsByQueue(state), [state]);
+  const arrivalsByAttendant = useMemo(() => selectArrivalsByAttendant(state), [state]);
   const deliveriesByAttendant = useMemo(() => selectDeliveries(state), [state]);
   const activeServicesByAttendant = useMemo(
     () => selectActiveServices(state),
@@ -555,6 +611,8 @@ export function useOperationalLedger({
     lastSyncTime,
     pollNow,
     totalArrivals,
+    arrivalsByQueue,
+    arrivalsByAttendant,
     deliveriesByAttendant,
     activeServicesByAttendant,
     logItems,

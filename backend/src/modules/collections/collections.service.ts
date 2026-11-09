@@ -187,6 +187,7 @@ export class CollectionsService {
               include: { attendant: true },
             },
           },
+          orderBy: { createdAt: 'asc' },
         },
         pauses: {
           orderBy: { startedAt: 'asc' },
@@ -210,18 +211,38 @@ export class CollectionsService {
     }
 
     const grouped = await prisma.event.groupBy({
-      by: ['eventType', 'attendantId'],
+      by: ['eventType', 'attendantId', 'queueId'],
       where: { collectionId, isVoided: false },
       _count: { _all: true },
     });
 
+    const queueToAttendantId: Record<string, string> = {};
+    for (const q of collection.queues) {
+      if (q.attendants && q.attendants.length === 1) {
+        queueToAttendantId[q.id] = q.attendants[0].attendantId;
+      }
+    }
+
     let arrivals = 0;
+    const arrivalsByQueue: Record<string, number> = {};
+    const arrivalsByAttendant: Record<string, number> = {};
     const deliveriesByAttendant: Record<string, number> = {};
-    collection.attendants.forEach((a) => (deliveriesByAttendant[a.id] = 0));
+    collection.queues.forEach((q) => (arrivalsByQueue[q.id] = 0));
+    collection.attendants.forEach((a) => {
+      arrivalsByAttendant[a.id] = 0;
+      deliveriesByAttendant[a.id] = 0;
+    });
 
     for (const g of grouped) {
       if (g.eventType === 'ARRIVAL') {
         arrivals += g._count._all;
+        if (g.queueId) {
+          arrivalsByQueue[g.queueId] = (arrivalsByQueue[g.queueId] || 0) + g._count._all;
+        }
+        const resolvedAttId = g.attendantId || (g.queueId ? queueToAttendantId[g.queueId] : undefined);
+        if (resolvedAttId) {
+          arrivalsByAttendant[resolvedAttId] = (arrivalsByAttendant[resolvedAttId] || 0) + g._count._all;
+        }
       } else if (g.eventType === 'DELIVERY' && g.attendantId) {
         deliveriesByAttendant[g.attendantId] = (deliveriesByAttendant[g.attendantId] || 0) + g._count._all;
       }
@@ -231,6 +252,8 @@ export class CollectionsService {
       ...formatCollectionResponse(collection),
       eventCounts: {
         arrivals,
+        arrivalsByQueue,
+        arrivalsByAttendant,
         deliveriesByAttendant,
       },
     };
@@ -349,8 +372,15 @@ export class CollectionsService {
         where: { id: collection.id },
         include: {
           owner: { select: { id: true, name: true, email: true } },
-          attendants: true,
-          queues: true,
+          attendants: { orderBy: { code: 'asc' } },
+          queues: {
+            include: {
+              attendants: {
+                include: { attendant: true },
+              },
+            },
+            orderBy: { createdAt: 'asc' },
+          },
         },
       });
 
@@ -761,6 +791,14 @@ export class CollectionsService {
             pauses: {
               orderBy: { startedAt: 'asc' },
             },
+            queues: {
+              select: {
+                id: true,
+                attendants: {
+                  select: { attendantId: true },
+                },
+              },
+            },
           },
         }),
         prisma.serviceInterval.findMany({
@@ -785,7 +823,7 @@ export class CollectionsService {
           },
         }),
         prisma.event.groupBy({
-          by: ['eventType', 'attendantId'],
+          by: ['eventType', 'attendantId', 'queueId'],
           where: { collectionId, isVoided: false },
           OrderBy: undefined,
           _count: { _all: true },
@@ -798,11 +836,31 @@ export class CollectionsService {
       throw new AppError('Coleta não encontrada.', 404, 'NOT_FOUND');
     }
 
+    const queueToAttendantId: Record<string, string> = {};
+    for (const q of collection.queues || []) {
+      if (q.attendants && q.attendants.length === 1) {
+        queueToAttendantId[q.id] = q.attendants[0].attendantId;
+      }
+    }
+
     let arrivals = 0;
+    const arrivalsByQueue: Record<string, number> = {};
+    const arrivalsByAttendant: Record<string, number> = {};
     const deliveriesByAttendant: Record<string, number> = {};
+    for (const q of collection.queues || []) {
+      arrivalsByQueue[q.id] = 0;
+    }
+
     for (const g of grouped as any[]) {
       if (g.eventType === 'ARRIVAL') {
         arrivals += g._count._all;
+        if (g.queueId) {
+          arrivalsByQueue[g.queueId] = (arrivalsByQueue[g.queueId] || 0) + g._count._all;
+        }
+        const resolvedAttId = g.attendantId || (g.queueId ? queueToAttendantId[g.queueId] : undefined);
+        if (resolvedAttId) {
+          arrivalsByAttendant[resolvedAttId] = (arrivalsByAttendant[resolvedAttId] || 0) + g._count._all;
+        }
       } else if (g.eventType === 'DELIVERY' && g.attendantId) {
         deliveriesByAttendant[g.attendantId] = (deliveriesByAttendant[g.attendantId] || 0) + g._count._all;
       }
@@ -827,6 +885,8 @@ export class CollectionsService {
       serverTime: now.toISOString(),
       eventCounts: {
         arrivals,
+        arrivalsByQueue,
+        arrivalsByAttendant,
         deliveriesByAttendant,
       },
       eventStates: recentKeys.map((e) => [e.idempotencyKey, e.isVoided, e.id] as [string, boolean, string]),

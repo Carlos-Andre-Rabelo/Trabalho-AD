@@ -38,9 +38,43 @@ export class EventsService {
       );
     }
 
-    // 3. Validação do Atendente se for DELIVERY
+    // 3. Validação do Atendente se for DELIVERY e resolução automática Fila <-> Atendente em ARRIVAL
     if (input.eventType === EventType.DELIVERY && !input.attendantId) {
       throw new AppError('O identificador do atendente é obrigatório para eventos de entrega de proteína.', 400);
+    }
+
+    let resolvedQueueId = input.queueId;
+    let resolvedAttendantId = input.attendantId;
+
+    if (input.eventType === EventType.ARRIVAL) {
+      if (resolvedQueueId && !resolvedAttendantId) {
+        const links = await prisma.queueAttendant.findMany({
+          where: { queueId: resolvedQueueId },
+          select: { attendantId: true },
+        });
+        if (links.length === 1) {
+          resolvedAttendantId = links[0].attendantId;
+        }
+      } else if (resolvedAttendantId && !resolvedQueueId) {
+        const link = await prisma.queueAttendant.findFirst({
+          where: {
+            attendantId: resolvedAttendantId,
+            queue: { collectionId },
+          },
+          select: { queueId: true },
+        });
+        if (link) {
+          resolvedQueueId = link.queueId;
+        }
+      } else if (!resolvedQueueId && collection.queueMode === 'SINGLE_QUEUE') {
+        const singleQueue = await prisma.queue.findFirst({
+          where: { collectionId },
+          select: { id: true },
+        });
+        if (singleQueue) {
+          resolvedQueueId = singleQueue.id;
+        }
+      }
     }
 
     const now = new Date();
@@ -60,8 +94,8 @@ export class EventsService {
       const event = await prisma.event.create({
         data: {
           collectionId,
-          attendantId: input.attendantId,
-          queueId: input.queueId,
+          attendantId: resolvedAttendantId,
+          queueId: resolvedQueueId,
           eventType: input.eventType as EventType,
           occurredAt,
           recordedAt: now,

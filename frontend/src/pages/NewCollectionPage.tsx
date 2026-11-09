@@ -166,6 +166,15 @@ export const NewCollectionPage: React.FC = () => {
                 <option value="SINGLE_QUEUE">Fila Única</option>
                 <option value="CUSTOM">Personalizado</option>
               </select>
+              <p className="mt-1 text-[11px] text-slate-500 leading-snug">
+                {queueMode === 'SEPARATE_QUEUES'
+                  ? `Cria automaticamente botões individuais de chegada para cada fila (${attendants
+                      .map((a) => `Fila ${a.code || '?'}`)
+                      .join(', ')}) com contadores e métricas independentes.`
+                  : queueMode === 'SINGLE_QUEUE'
+                  ? 'Todos os alunos entram em uma única fila compartilhada (+1 Chegada geral) atendida pelos servidores.'
+                  : 'Configuração de fila personalizada.'}
+              </p>
             </div>
           </div>
 
