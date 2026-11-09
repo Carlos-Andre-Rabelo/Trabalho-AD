@@ -2,81 +2,121 @@ import { prisma } from '../../config/prisma.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { CollectionStatus, EventType, ServiceIntervalStatus, MeasurementMethod } from '@prisma/client';
 import { sseManager } from '../events/events.sse.js';
+import { collectionsService } from '../collections/collections.service.js';
 
 export interface StartServiceInput {
   attendantId: string;
   queueId?: string;
+  idempotencyKey?: string;
+  occurredAt?: string;
 }
 
 export interface FinishServiceInput {
   attendantId: string;
   serviceIntervalId?: string;
   idempotencyKey: string;
+  occurredAt?: string;
   proteinAmount?: number;
   measurementMethod?: 'MEASURED' | 'ESTIMATED';
   proteinNotes?: string;
 }
 
 export class ServicesService {
-  async startService(userId: string, collectionId: string, input: StartServiceInput) {
-    const collection = await prisma.collection.findFirst({
-      where: { id: collectionId },
-    });
-
-    if (!collection) {
-      throw new AppError('Coleta não encontrada.', 404);
+  async startService(_userId: string, collectionId: string, input: StartServiceInput) {
+    if (!input?.attendantId) {
+      throw new AppError('O identificador do atendente é obrigatório.', 400, 'VALIDATION_ERROR');
     }
 
-    if (collection.status !== CollectionStatus.IN_PROGRESS) {
-      throw new AppError(`A coleta precisa estar em andamento para iniciar atendimentos. Status atual: ${collection.status}`, 400);
-    }
+    // 0. Garante que o prazo não tenha expirado antes de iniciar atendimento
+    await collectionsService.enforceDeadline(collectionId);
 
-    // Verificar se atendente já possui atendimento em andamento
-    const active = await prisma.serviceInterval.findFirst({
-      where: {
-        collectionId,
-        attendantId: input.attendantId,
-        status: ServiceIntervalStatus.IN_PROGRESS,
-      },
+    const txResult = await prisma.$transaction(async (tx) => {
+      const collection = await tx.collection.findFirst({
+        where: { id: collectionId },
+      });
+
+      if (!collection) {
+        throw new AppError('Coleta não encontrada.', 404, 'NOT_FOUND');
+      }
+
+      if (collection.status !== CollectionStatus.IN_PROGRESS) {
+        throw new AppError(
+          `A coleta precisa estar em andamento para iniciar atendimentos. Status atual: ${collection.status}`,
+          400,
+          'INVALID_COLLECTION_STATUS'
+        );
+      }
+
+      // Serializa operações por atendente no nível de linha do PostgreSQL
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM attendants
+        WHERE id = ${input.attendantId}::uuid AND collection_id = ${collectionId}::uuid
+        FOR UPDATE
+      `;
+
+      if (!locked || locked.length === 0) {
+        throw new AppError('Atendente não encontrado nesta coleta.', 404, 'ATTENDANT_NOT_FOUND');
+      }
+
+      // Se já houver atendimento em andamento para este atendente, retorna-o de forma idempotente
+      const active = await tx.serviceInterval.findFirst({
+        where: {
+          collectionId,
+          attendantId: input.attendantId,
+          status: ServiceIntervalStatus.IN_PROGRESS,
+        },
+        include: { attendant: true },
+      });
+
+      if (active) {
+        return { interval: active, isReplay: true };
+      }
+
+      const now = new Date();
+      let startedAt = now;
+      if (input.occurredAt) {
+        const parsed = new Date(input.occurredAt);
+        if (!isNaN(parsed.getTime()) && parsed.getTime() <= now.getTime() + 60000) {
+          startedAt = parsed;
+        }
+      }
+      if (collection.startedAt && startedAt.getTime() < new Date(collection.startedAt).getTime()) {
+        startedAt = new Date(collection.startedAt);
+      }
+
+      const interval = await tx.serviceInterval.create({
+        data: {
+          collectionId,
+          attendantId: input.attendantId,
+          queueId: input.queueId,
+          startedAt,
+          status: ServiceIntervalStatus.IN_PROGRESS,
+        },
+        include: { attendant: true },
+      });
+
+      return { interval, isReplay: false };
     });
 
-    if (active) {
-      throw new AppError('Este atendente já possui um atendimento em andamento. Conclua-o antes de iniciar outro.', 409);
+    if (!txResult.isReplay) {
+      sseManager.broadcast(collectionId, 'service:started', txResult.interval);
     }
 
-    const now = new Date();
-    const interval = await prisma.serviceInterval.create({
-      data: {
-        collectionId,
-        attendantId: input.attendantId,
-        queueId: input.queueId,
-        startedAt: now,
-        status: ServiceIntervalStatus.IN_PROGRESS,
-      },
-      include: { attendant: true },
-    });
-
-    sseManager.broadcast(collectionId, 'service:started', interval);
-
-    return interval;
+    return txResult.interval;
   }
 
   async finishService(userId: string, collectionId: string, input: FinishServiceInput) {
-    const collection = await prisma.collection.findFirst({
-      where: { id: collectionId },
-    });
-
-    if (!collection) {
-      throw new AppError('Coleta não encontrada.', 404);
+    if (!input?.attendantId || !input?.idempotencyKey) {
+      throw new AppError('Atendente e chave de idempotência são obrigatórios.', 400, 'VALIDATION_ERROR');
     }
 
-    if (collection.status !== CollectionStatus.IN_PROGRESS) {
-      throw new AppError(`A coleta precisa estar em andamento para concluir atendimentos. Status atual: ${collection.status}`, 400);
-    }
+    // 0. Garante que o prazo não tenha expirado antes de concluir atendimento
+    await collectionsService.enforceDeadline(collectionId);
 
-    // Idempotência
+    // 1. Checagem rápida de idempotência antes da transação
     const existingEvent = await prisma.event.findUnique({
       where: { idempotencyKey: input.idempotencyKey },
+      include: { attendant: true, queue: true },
     });
 
     if (existingEvent) {
@@ -84,13 +124,58 @@ export class ServicesService {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // Serializa operações por atendente no nível de linha do PostgreSQL
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM attendants
+        WHERE id = ${input.attendantId}::uuid AND collection_id = ${collectionId}::uuid
+        FOR UPDATE
+      `;
+
+      if (!locked || locked.length === 0) {
+        throw new AppError('Atendente não encontrado nesta coleta.', 404, 'ATTENDANT_NOT_FOUND');
+      }
+
+      // Recheca idempotência dentro do lock
+      const replayInsideLock = await tx.event.findUnique({
+        where: { idempotencyKey: input.idempotencyKey },
+        include: { attendant: true, queue: true },
+      });
+      if (replayInsideLock) {
+        return { event: replayInsideLock, interval: null, isReplay: true };
+      }
+
+      const collection = await tx.collection.findFirst({
+        where: { id: collectionId },
+      });
+
+      if (!collection) {
+        throw new AppError('Coleta não encontrada.', 404, 'NOT_FOUND');
+      }
+
+      if (collection.status !== CollectionStatus.IN_PROGRESS) {
+        throw new AppError(
+          `A coleta precisa estar em andamento para concluir atendimentos. Status atual: ${collection.status}`,
+          400,
+          'INVALID_COLLECTION_STATUS'
+        );
+      }
+
       // Localizar o intervalo ativo
       let interval = null;
       if (input.serviceIntervalId) {
-        interval = await tx.serviceInterval.findUnique({
-          where: { id: input.serviceIntervalId },
+        interval = await tx.serviceInterval.findFirst({
+          where: {
+            id: input.serviceIntervalId,
+            collectionId,
+            attendantId: input.attendantId,
+          },
         });
-      } else {
+        if (interval && interval.status !== ServiceIntervalStatus.IN_PROGRESS) {
+          throw new AppError('Este atendimento já foi encerrado ou cancelado.', 409, 'INTERVAL_NOT_ACTIVE');
+        }
+      }
+
+      if (!interval) {
         interval = await tx.serviceInterval.findFirst({
           where: {
             collectionId,
@@ -102,23 +187,45 @@ export class ServicesService {
       }
 
       if (!interval) {
-        throw new AppError('Nenhum atendimento em andamento para este atendente.', 404);
+        throw new AppError('Nenhum atendimento em andamento para este atendente.', 404, 'NO_ACTIVE_INTERVAL');
       }
 
       const now = new Date();
       const startedAt = new Date(interval.startedAt);
-      const durationMs = Math.max(0, now.getTime() - startedAt.getTime());
+      let endedAt = now;
+      if (input.occurredAt) {
+        const parsed = new Date(input.occurredAt);
+        if (!isNaN(parsed.getTime()) && parsed.getTime() <= now.getTime() + 60000) {
+          endedAt = parsed;
+        }
+      }
+      if (endedAt.getTime() < startedAt.getTime()) {
+        endedAt = startedAt;
+      }
+
+      const durationMs = Math.max(0, endedAt.getTime() - startedAt.getTime());
       const durationSeconds = Math.round(durationMs / 1000);
 
-      // 1. Concluir o intervalo
-      const updatedInterval = await tx.serviceInterval.update({
-        where: { id: interval.id },
+      // 1. Concluir o intervalo atomicamente garantindo que ainda estava IN_PROGRESS
+      const claimed = await tx.serviceInterval.updateMany({
+        where: { id: interval.id, status: ServiceIntervalStatus.IN_PROGRESS },
         data: {
-          endedAt: now,
+          endedAt,
           durationMs,
           status: ServiceIntervalStatus.COMPLETED,
         },
       });
+
+      if (claimed.count === 0) {
+        throw new AppError('Este atendimento já foi encerrado concorrentemente.', 409, 'INTERVAL_NOT_ACTIVE');
+      }
+
+      const updatedInterval = {
+        ...interval,
+        endedAt,
+        durationMs,
+        status: ServiceIntervalStatus.COMPLETED,
+      };
 
       // 2. Criar o evento correspondente de entrega
       const event = await tx.event.create({
@@ -127,20 +234,20 @@ export class ServicesService {
           attendantId: input.attendantId,
           queueId: interval.queueId,
           eventType: EventType.DELIVERY,
-          occurredAt: now,
+          occurredAt: endedAt,
           recordedAt: now,
           recordedBy: userId,
           idempotencyKey: input.idempotencyKey,
           metadata: {
             serviceIntervalId: updatedInterval.id,
             startedAt: startedAt.toISOString(),
-            endedAt: now.toISOString(),
+            endedAt: endedAt.toISOString(),
             durationMs,
             durationSeconds,
             isTimed: true,
           },
         },
-        include: { attendant: true },
+        include: { attendant: true, queue: true },
       });
 
       // 3. Registrar medição de proteína se enviada
@@ -177,7 +284,8 @@ export class ServicesService {
     return result;
   }
 
-  async cancelActiveService(userId: string, collectionId: string, attendantId: string) {
+  async cancelActiveService(_userId: string, collectionId: string, attendantId: string) {
+    await collectionsService.enforceDeadline(collectionId);
     const collection = await prisma.collection.findFirst({
       where: { id: collectionId },
     });
@@ -212,6 +320,7 @@ export class ServicesService {
   }
 
   async getActiveServices(_userId: string, collectionId: string) {
+    await collectionsService.enforceDeadline(collectionId);
     const collection = await prisma.collection.findFirst({
       where: { id: collectionId },
     });

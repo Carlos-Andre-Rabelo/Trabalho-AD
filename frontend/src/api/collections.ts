@@ -25,6 +25,8 @@ export interface Collection {
   startedAt?: string | null;
   endedAt?: string | null;
   targetDurationMinutes?: number | null;
+  deadlineAt?: string | null;
+  remainingMs?: number | null;
   notes?: string | null;
   remoteToken?: string;
   owner?: {
@@ -156,11 +158,15 @@ export const collectionsApi = {
     startedAt?: string | null;
     pausedAt?: string | null;
     finishedAt?: string | null;
+    pauses?: Array<{ id: string; startedAt: string; endedAt: string | null; reason: string | null }>;
+    deadlineAt?: string | null;
+    remainingMs?: number | null;
     serverTime: string;
     eventCounts: {
       arrivals: number;
       deliveriesByAttendant: Record<string, number>;
     };
+    eventStates?: Array<[string, boolean, string]>;
     activeServices: any[];
     recentEvents: any[];
   }> {

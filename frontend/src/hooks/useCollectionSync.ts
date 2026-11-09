@@ -1,18 +1,23 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { API_BASE_URL } from '../api/client.js';
 import { collectionsApi } from '../api/collections.js';
+import { updateServerClock } from '../operational/clock.js';
 
 export interface SyncStateData {
-  status: string;
+  status: 'DRAFT' | 'IN_PROGRESS' | 'PAUSED' | 'FINISHED';
   targetDurationMinutes?: number | null;
   startedAt?: string | null;
   pausedAt?: string | null;
   finishedAt?: string | null;
+  pauses?: Array<{ id: string; startedAt: string; endedAt: string | null; reason: string | null }>;
+  deadlineAt?: string | null;
+  remainingMs?: number | null;
   serverTime: string;
   eventCounts: {
     arrivals: number;
     deliveriesByAttendant: Record<string, number>;
   };
+  eventStates?: Array<[string, boolean, string]>;
   activeServices: any[];
   recentEvents: any[];
 }
@@ -20,56 +25,41 @@ export interface SyncStateData {
 export interface UseCollectionSyncOptions {
   collectionId?: string;
   token?: string;
-  onEventCreated?: (event: any) => void;
-  onEventVoided?: (event: any) => void;
+  onSyncState?: (data: SyncStateData, seq: number) => void;
   onStatusChanged?: (collection: any) => void;
   onClientsChange?: (count: number) => void;
-  onServiceStarted?: (interval: any) => void;
-  onServiceFinished?: (data: { interval: any; event: any }) => void;
-  onServiceCancelled?: (data: { attendantId: string }) => void;
-  onSyncState?: (data: SyncStateData) => void;
 }
 
 export function useCollectionSync({
   collectionId,
   token,
-  onEventCreated,
-  onEventVoided,
+  onSyncState,
   onStatusChanged,
   onClientsChange,
-  onServiceStarted,
-  onServiceFinished,
-  onServiceCancelled,
-  onSyncState,
 }: UseCollectionSyncOptions) {
   const [isConnected, setIsConnected] = useState(false);
   const [connectedClients, setConnectedClients] = useState(1);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
 
-  // Armazena callbacks em refs para evitar reconectar o EventSource ou reiniciar polling
   const callbacksRef = useRef({
-    onEventCreated,
-    onEventVoided,
+    onSyncState,
     onStatusChanged,
     onClientsChange,
-    onServiceStarted,
-    onServiceFinished,
-    onServiceCancelled,
-    onSyncState,
   });
 
   useEffect(() => {
     callbacksRef.current = {
-      onEventCreated,
-      onEventVoided,
+      onSyncState,
       onStatusChanged,
       onClientsChange,
-      onServiceStarted,
-      onServiceFinished,
-      onServiceCancelled,
-      onSyncState,
     };
   });
+
+  const pollNowRef = useRef<() => void>(() => {});
+
+  const pollNow = useCallback(() => {
+    pollNowRef.current();
+  }, []);
 
   useEffect(() => {
     if (!collectionId) return;
@@ -81,10 +71,95 @@ export function useCollectionSync({
     let eventSource: EventSource | null = null;
     let reconnectTimeout: any = null;
     let pollTimer: any = null;
+    let sseDebounceTimer: any = null;
     let isUnmounted = false;
-    let lastPollTimestamp = new Date(Date.now() - 30000).toISOString();
+    let isPolling = false;
+    let pendingImmediatePoll = false;
+    let seqCounter = 0;
+    let lastKnownStatus = 'IN_PROGRESS';
 
-    // 1. Conexão SSE para ambientes com streaming contínuo
+    function getPollIntervalMs() {
+      if (lastKnownStatus === 'IN_PROGRESS') return 1200;
+      if (lastKnownStatus === 'FINISHED') return 6000;
+      return 3000;
+    }
+
+    function scheduleNextPoll(delayMs = getPollIntervalMs()) {
+      if (isUnmounted) return;
+      if (pollTimer) clearTimeout(pollTimer);
+      pollTimer = setTimeout(runPoll, delayMs);
+    }
+
+    function triggerImmediatePoll() {
+      if (isUnmounted) return;
+      if (isPolling) {
+        pendingImmediatePoll = true;
+        return;
+      }
+      scheduleNextPoll(0);
+    }
+
+    function triggerDebouncedPoll() {
+      if (isUnmounted) return;
+      if (sseDebounceTimer) return;
+      sseDebounceTimer = setTimeout(() => {
+        sseDebounceTimer = null;
+        triggerImmediatePoll();
+      }, 60);
+    }
+
+    pollNowRef.current = triggerImmediatePoll;
+
+    async function runPoll() {
+      if (isUnmounted) return;
+      if (isPolling) {
+        pendingImmediatePoll = true;
+        return;
+      }
+
+      isPolling = true;
+      const mySeq = ++seqCounter;
+      const t0 = Date.now();
+
+      try {
+        const syncData = await collectionsApi.getSyncState(activeCollectionId);
+        if (isUnmounted) return;
+
+        const rttMs = Date.now() - t0;
+        updateServerClock(syncData.serverTime, rttMs);
+
+        setIsConnected(true);
+        setLastSyncTime(new Date());
+        lastKnownStatus = syncData.status || lastKnownStatus;
+
+        callbacksRef.current.onSyncState?.(syncData, mySeq);
+
+        if (syncData.status) {
+          callbacksRef.current.onStatusChanged?.({
+            status: syncData.status,
+            targetDurationMinutes: syncData.targetDurationMinutes,
+            startedAt: syncData.startedAt,
+            endedAt: syncData.finishedAt,
+            pauses: syncData.pauses,
+            deadlineAt: syncData.deadlineAt,
+            remainingMs: syncData.remainingMs,
+          });
+        }
+      } catch {
+        // Falha transitória de rede tratada silenciosamente
+      } finally {
+        isPolling = false;
+        if (!isUnmounted) {
+          if (pendingImmediatePoll) {
+            pendingImmediatePoll = false;
+            scheduleNextPoll(40);
+          } else {
+            scheduleNextPoll(getPollIntervalMs());
+          }
+        }
+      }
+    }
+
     function connectSSE() {
       if (isUnmounted) return;
 
@@ -119,87 +194,29 @@ export function useCollectionSync({
                 setConnectedClients(data.connectedClients);
                 callbacksRef.current.onClientsChange?.(data.connectedClients);
               }
-            } catch (err) {
-              console.error('Erro ao ler sync:clients', err);
-            }
+            } catch {}
           }
         });
 
-        eventSource.addEventListener('event:created', (e: MessageEvent) => {
-          if (!isUnmounted && e.data) {
-            try {
-              const event = JSON.parse(e.data);
-              setLastSyncTime(new Date());
-              callbacksRef.current.onEventCreated?.(event);
-            } catch (err) {
-              console.error('Erro ao processar event:created', err);
+        // Qualquer evento SSE atua apenas como gatilho imediato de poll (fonte única de verdade = snapshot)
+        const triggerEvents = [
+          'event:created',
+          'event:voided',
+          'collection:status',
+          'service:started',
+          'service:finished',
+          'service:cancelled',
+        ];
+        for (const evName of triggerEvents) {
+          eventSource.addEventListener(evName, () => {
+            if (!isUnmounted) {
+              triggerDebouncedPoll();
             }
-          }
-        });
-
-        eventSource.addEventListener('event:voided', (e: MessageEvent) => {
-          if (!isUnmounted && e.data) {
-            try {
-              const event = JSON.parse(e.data);
-              setLastSyncTime(new Date());
-              callbacksRef.current.onEventVoided?.(event);
-            } catch (err) {
-              console.error('Erro ao processar event:voided', err);
-            }
-          }
-        });
-
-        eventSource.addEventListener('collection:status', (e: MessageEvent) => {
-          if (!isUnmounted && e.data) {
-            try {
-              const col = JSON.parse(e.data);
-              setLastSyncTime(new Date());
-              callbacksRef.current.onStatusChanged?.(col);
-            } catch (err) {
-              console.error('Erro ao processar collection:status', err);
-            }
-          }
-        });
-
-        eventSource.addEventListener('service:started', (e: MessageEvent) => {
-          if (!isUnmounted && e.data) {
-            try {
-              const interval = JSON.parse(e.data);
-              setLastSyncTime(new Date());
-              callbacksRef.current.onServiceStarted?.(interval);
-            } catch (err) {
-              console.error('Erro ao processar service:started', err);
-            }
-          }
-        });
-
-        eventSource.addEventListener('service:finished', (e: MessageEvent) => {
-          if (!isUnmounted && e.data) {
-            try {
-              const payload = JSON.parse(e.data);
-              setLastSyncTime(new Date());
-              callbacksRef.current.onServiceFinished?.(payload);
-            } catch (err) {
-              console.error('Erro ao processar service:finished', err);
-            }
-          }
-        });
-
-        eventSource.addEventListener('service:cancelled', (e: MessageEvent) => {
-          if (!isUnmounted && e.data) {
-            try {
-              const payload = JSON.parse(e.data);
-              setLastSyncTime(new Date());
-              callbacksRef.current.onServiceCancelled?.(payload);
-            } catch (err) {
-              console.error('Erro ao processar service:cancelled', err);
-            }
-          }
-        });
+          });
+        }
 
         eventSource.onerror = () => {
           if (!isUnmounted) {
-            setIsConnected(false);
             if (eventSource) {
               eventSource.close();
               eventSource = null;
@@ -207,62 +224,19 @@ export function useCollectionSync({
             reconnectTimeout = setTimeout(connectSSE, 4000);
           }
         };
-      } catch (err) {
-        console.error('Falha ao iniciar EventSource:', err);
-        setIsConnected(false);
+      } catch {
         reconnectTimeout = setTimeout(connectSSE, 5000);
       }
     }
 
-    // 2. Polling inteligente de alta frequência (a cada 1200ms)
-    // Garante sincronização bidirecional em tempo real perfeita mesmo em plataformas Serverless (como Vercel)
-    async function pollSync() {
-      if (isUnmounted) return;
-      try {
-        const syncData = await collectionsApi.getSyncState(activeCollectionId, lastPollTimestamp);
-        if (isUnmounted) return;
-
-        setIsConnected(true);
-        setLastSyncTime(new Date());
-        lastPollTimestamp = syncData.serverTime || new Date().toISOString();
-
-        // Dispara o callback estruturado global
-        callbacksRef.current.onSyncState?.(syncData);
-
-        // Dispara eventos novos recebidos de outros dispositivos
-        if (syncData.recentEvents && syncData.recentEvents.length > 0) {
-          for (const ev of syncData.recentEvents) {
-            if (ev.isVoided) {
-              callbacksRef.current.onEventVoided?.(ev);
-            } else {
-              callbacksRef.current.onEventCreated?.(ev);
-            }
-          }
-        }
-
-        // Atualiza status se mudou
-        if (syncData.status) {
-          callbacksRef.current.onStatusChanged?.({
-            status: syncData.status,
-            targetDurationMinutes: syncData.targetDurationMinutes,
-          });
-        }
-      } catch (err) {
-        // Silencioso em caso de micro-falhas transitórias de rede
-      } finally {
-        if (!isUnmounted) {
-          pollTimer = setTimeout(pollSync, 1200);
-        }
-      }
-    }
-
     connectSSE();
-    pollTimer = setTimeout(pollSync, 600);
+    scheduleNextPoll(80);
 
     return () => {
       isUnmounted = true;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (pollTimer) clearTimeout(pollTimer);
+      if (sseDebounceTimer) clearTimeout(sseDebounceTimer);
       if (eventSource) {
         eventSource.close();
         eventSource = null;
@@ -275,5 +249,6 @@ export function useCollectionSync({
     isConnected,
     connectedClients,
     lastSyncTime,
+    pollNow,
   };
 }

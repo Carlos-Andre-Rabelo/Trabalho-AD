@@ -17,7 +17,19 @@ export const ConnectivityProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   const updatePending = () => {
     const queue = getOfflineQueue();
-    setPendingCount(queue.length);
+    let ledgerPending = 0;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('ru_ops_ledger_')) {
+          const parsed = JSON.parse(localStorage.getItem(k) || '[]');
+          if (Array.isArray(parsed)) {
+            ledgerPending += parsed.length;
+          }
+        }
+      }
+    } catch {}
+    setPendingCount(queue.length + ledgerPending);
   };
 
   const syncNow = async () => {

@@ -1,9 +1,13 @@
 import { apiRequest } from './client.js';
 
 export const servicesApi = {
-  async startService(collectionId: string, data: { attendantId: string; queueId?: string }) {
+  async startService(
+    collectionId: string,
+    data: { attendantId: string; queueId?: string; idempotencyKey?: string; occurredAt?: string }
+  ) {
     const res = await apiRequest<{ success: boolean; data: any }>(`/collections/${collectionId}/services/start`, {
       method: 'POST',
+      idempotencyKey: data.idempotencyKey,
       body: JSON.stringify(data),
     });
     return res.data;
@@ -15,6 +19,7 @@ export const servicesApi = {
       attendantId: string;
       serviceIntervalId?: string;
       idempotencyKey: string;
+      occurredAt?: string;
       proteinAmount?: number;
       measurementMethod?: 'MEASURED' | 'ESTIMATED';
       proteinNotes?: string;

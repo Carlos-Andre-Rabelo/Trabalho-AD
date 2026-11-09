@@ -4,10 +4,24 @@ import { recordAuditLog } from '../audit/audit.service.js';
 import { CreateEventInput, VoidEventInput } from './events.schema.js';
 import { CollectionStatus, EventType } from '@prisma/client';
 import { sseManager } from './events.sse.js';
+import { collectionsService } from '../collections/collections.service.js';
 
 export class EventsService {
   async createEvent(userId: string, collectionId: string, input: CreateEventInput) {
-    // 1. Verificar Coleta e Status
+    // 0. Verifica se o prazo da coleta já se esgotou antes de aceitar novos eventos
+    await collectionsService.enforceDeadline(collectionId);
+
+    // 1. Checagem rápida de Idempotência (permite replay mesmo após encerramento se já gravado)
+    const existing = await prisma.event.findUnique({
+      where: { idempotencyKey: input.idempotencyKey },
+      include: { attendant: true, queue: true },
+    });
+
+    if (existing) {
+      return { event: existing, isReplay: true };
+    }
+
+    // 2. Verificar Coleta e Status
     const collection = await prisma.collection.findFirst({
       where: { id: collectionId },
     });
@@ -24,16 +38,6 @@ export class EventsService {
       );
     }
 
-    // 2. Checagem de Idempotência
-    const existing = await prisma.event.findUnique({
-      where: { idempotencyKey: input.idempotencyKey },
-      include: { attendant: true, queue: true },
-    });
-
-    if (existing) {
-      return { event: existing, isReplay: true };
-    }
-
     // 3. Validação do Atendente se for DELIVERY
     if (input.eventType === EventType.DELIVERY && !input.attendantId) {
       throw new AppError('O identificador do atendente é obrigatório para eventos de entrega de proteína.', 400);
@@ -43,40 +47,55 @@ export class EventsService {
     let occurredAt = now;
     if (input.occurredAt) {
       const parsed = new Date(input.occurredAt);
-      // Protege contra datas inválidas ou timestamps muito no futuro (> 1 min)
       if (!isNaN(parsed.getTime()) && parsed.getTime() <= now.getTime() + 60000) {
         occurredAt = parsed;
       }
     }
+    if (collection.startedAt && occurredAt.getTime() < new Date(collection.startedAt).getTime()) {
+      occurredAt = new Date(collection.startedAt);
+    }
 
-    // 4. Criação do Evento
-    const event = await prisma.event.create({
-      data: {
-        collectionId,
-        attendantId: input.attendantId,
-        queueId: input.queueId,
-        eventType: input.eventType as EventType,
-        occurredAt,
-        recordedAt: now,
-        recordedBy: userId,
-        idempotencyKey: input.idempotencyKey,
-        metadata: input.metadata || undefined,
-      },
-      include: {
-        attendant: true,
-        queue: true,
-      },
-    });
+    // 4. Criação atômica do Evento (trata corrida P2002 na chave de idempotência)
+    try {
+      const event = await prisma.event.create({
+        data: {
+          collectionId,
+          attendantId: input.attendantId,
+          queueId: input.queueId,
+          eventType: input.eventType as EventType,
+          occurredAt,
+          recordedAt: now,
+          recordedBy: userId,
+          idempotencyKey: input.idempotencyKey,
+          metadata: input.metadata || undefined,
+        },
+        include: {
+          attendant: true,
+          queue: true,
+        },
+      });
 
-    sseManager.broadcast(collectionId, 'event:created', event);
+      sseManager.broadcast(collectionId, 'event:created', event);
 
-    return { event, isReplay: false };
+      return { event, isReplay: false };
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        const replay = await prisma.event.findUnique({
+          where: { idempotencyKey: input.idempotencyKey },
+          include: { attendant: true, queue: true },
+        });
+        if (replay) {
+          return { event: replay, isReplay: true };
+        }
+      }
+      throw err;
+    }
   }
 
   async voidEvent(userId: string, collectionId: string, eventId: string, input: VoidEventInput) {
     const event = await prisma.event.findFirst({
       where: { id: eventId, collectionId },
-      include: { collection: true },
+      include: { collection: true, attendant: true, queue: true },
     });
 
     if (!event) {
@@ -84,7 +103,7 @@ export class EventsService {
     }
 
     if (event.isVoided) {
-      throw new AppError('Este evento já foi previamente anulado.', 400, 'ALREADY_VOIDED');
+      return event;
     }
 
     const now = new Date();

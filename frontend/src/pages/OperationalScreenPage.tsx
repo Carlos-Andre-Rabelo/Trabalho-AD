@@ -1,174 +1,66 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { collectionsApi, Collection } from '../api/collections.js';
-import { eventsApi, EventItem } from '../api/events.js';
-import { servicesApi } from '../api/servicesApi.js';
+import { collectionsApi } from '../api/collections.js';
 import { OperationalTimer } from '../components/operational/OperationalTimer.js';
 import { AttendantCard } from '../components/operational/AttendantCard.js';
 import { ArrivalButton } from '../components/operational/ArrivalButton.js';
 import { EventLogQuickView } from '../components/operational/EventLogQuickView.js';
 import { QrCodeSyncModal } from '../components/operational/QrCodeSyncModal.js';
-import { useCollectionSync } from '../hooks/useCollectionSync.js';
+import { useOperationalLedger } from '../hooks/useOperationalLedger.js';
 import { Button } from '../components/common/Button.js';
-import { useConnectivity } from '../context/ConnectivityContext.js';
-import { enqueueOfflineEvent } from '../api/offlineQueue.js';
 import { metricsApi } from '../api/metrics.js';
-import { BarChart3, QrCode, FileSpreadsheet } from 'lucide-react';
+import { BarChart3, QrCode, FileSpreadsheet, AlertCircle } from 'lucide-react';
 
 export const OperationalScreenPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { isOnline } = useConnectivity();
 
-  const [collection, setCollection] = useState<Collection | null>(null);
-  const [recentEvents, setRecentEvents] = useState<EventItem[]>([]);
-  const [activeServices, setActiveServices] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [openDurationSignal, setOpenDurationSignal] = useState(0);
   const [isQrModalOpen, setIsQrModalOpen] = useState(false);
 
-  const [deliveriesByAttendant, setDeliveriesByAttendant] = useState<Record<string, number>>({});
-  const [totalArrivals, setTotalArrivals] = useState(0);
-
-  // Deduplicação de eventos entre resposta HTTP local e broadcast SSE
-  const processedEventIds = useRef<Set<string>>(new Set());
-  const voidedEventIds = useRef<Set<string>>(new Set());
-
-  const applyEventCreated = useCallback((newEvent: EventItem) => {
-    setRecentEvents((prev) => [newEvent, ...prev.filter((e) => e.id !== newEvent.id)].slice(0, 10));
-    if (processedEventIds.current.has(newEvent.id)) return;
-    processedEventIds.current.add(newEvent.id);
-
-    if (!newEvent.isVoided) {
-      if (newEvent.eventType === 'ARRIVAL') {
-        setTotalArrivals((prev) => prev + 1);
-      } else if (newEvent.eventType === 'DELIVERY' && newEvent.attendantId) {
-        setDeliveriesByAttendant((prev) => ({
-          ...prev,
-          [newEvent.attendantId!]: (prev[newEvent.attendantId!] || 0) + 1,
-        }));
-      }
-    }
-  }, []);
-
-  const applyEventVoided = useCallback((voidedEvent: EventItem) => {
-    setRecentEvents((prev) =>
-      prev.map((e) => (e.id === voidedEvent.id ? { ...e, isVoided: true } : e))
-    );
-    if (voidedEventIds.current.has(voidedEvent.id)) return;
-    voidedEventIds.current.add(voidedEvent.id);
-
-    if (voidedEvent.eventType === 'ARRIVAL') {
-      setTotalArrivals((prev) => Math.max(0, prev - 1));
-    } else if (voidedEvent.eventType === 'DELIVERY' && voidedEvent.attendantId) {
-      setDeliveriesByAttendant((prev) => ({
-        ...prev,
-        [voidedEvent.attendantId!]: Math.max(0, (prev[voidedEvent.attendantId!] || 1) - 1),
-      }));
-    }
-  }, []);
-
-  const handleSyncState = useCallback((syncData: any) => {
-    if (syncData.eventCounts) {
-      setTotalArrivals((prev) => Math.max(prev, syncData.eventCounts.arrivals));
-      setDeliveriesByAttendant((prev) => {
-        const next = { ...prev };
-        for (const [k, v] of Object.entries(syncData.eventCounts.deliveriesByAttendant as Record<string, number>)) {
-          next[k] = Math.max(next[k] || 0, v);
-        }
-        return next;
-      });
-    }
-    if (syncData.activeServices && Array.isArray(syncData.activeServices)) {
-      setActiveServices(syncData.activeServices);
-    }
-    if (syncData.status) {
-      setCollection((prev) => (prev ? { ...prev, status: syncData.status } : prev));
-    }
-  }, []);
-
-  const { connectedClients } = useCollectionSync({
-    collectionId: id,
-    onEventCreated: applyEventCreated,
-    onEventVoided: applyEventVoided,
-    onSyncState: handleSyncState,
-    onStatusChanged: (col) => {
-      setCollection((prev) => (prev ? { ...prev, status: col.status } : col));
-    },
-    onServiceStarted: (interval) => {
-      setActiveServices((prev) => {
-        if (prev.some((s) => s.attendantId === interval.attendantId)) return prev;
-        return [...prev, interval];
-      });
-    },
-    onServiceFinished: ({ interval, event }) => {
-      setActiveServices((prev) => prev.filter((s) => s.attendantId !== interval.attendantId));
-      if (event) {
-        applyEventCreated(event);
-      }
-    },
-    onServiceCancelled: ({ attendantId }) => {
-      setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
-    },
-  });
-
-  const loadData = useCallback(async () => {
-    if (!id) return;
-    try {
-      const [colData, recent, active] = await Promise.all([
-        collectionsApi.getById(id),
-        eventsApi.recent(id),
-        servicesApi.getActiveServices(id),
-      ]);
-
-      setCollection(colData);
-      setRecentEvents(recent);
-      setActiveServices(active);
-
-      recent.forEach((e) => {
-        processedEventIds.current.add(e.id);
-        if (e.isVoided) voidedEventIds.current.add(e.id);
-      });
-
-      const deliveriesCount: Record<string, number> = {};
-      colData.attendants.forEach((a) => {
-        deliveriesCount[a.id] = colData.eventCounts?.deliveriesByAttendant?.[a.id] ?? 0;
-      });
-
-      if (colData.eventCounts) {
-        setDeliveriesByAttendant(deliveriesCount);
-        setTotalArrivals(colData.eventCounts.arrivals);
-      } else {
-        let arrivalsCount = 0;
-        recent.forEach((e) => {
-          if (!e.isVoided) {
-            if (e.eventType === 'DELIVERY' && e.attendantId) {
-              deliveriesCount[e.attendantId] = (deliveriesCount[e.attendantId] || 0) + 1;
-            } else if (e.eventType === 'ARRIVAL') {
-              arrivalsCount++;
-            }
-          }
-        });
-        setDeliveriesByAttendant(deliveriesCount);
-        setTotalArrivals(arrivalsCount);
-      }
-    } catch (e) {
-      console.error('Erro ao carregar dados operacionais da coleta', e);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [id]);
+  const autoFinishRedirectTimerRef = useRef<any>(null);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    return () => {
+      if (autoFinishRedirectTimerRef.current) {
+        clearTimeout(autoFinishRedirectTimerRef.current);
+      }
+    };
+  }, []);
+
+  const {
+    collection,
+    setCollection,
+    isLoading,
+    connectedClients,
+    pollNow,
+    totalArrivals,
+    deliveriesByAttendant,
+    activeServicesByAttendant,
+    logItems,
+    registerArrival,
+    startService,
+    finishService,
+    retryOp,
+    dismissOp,
+    voidEvent,
+    handleTimerExpiredLocally,
+  } = useOperationalLedger({
+    collectionId: id,
+  });
 
   const handleStartCollection = async () => {
     if (!id) return;
     setActionLoading(true);
+    setActionNotice(null);
     try {
       const updated = await collectionsApi.start(id);
-      setCollection(updated);
+      setCollection((prev) => (prev ? { ...prev, ...updated } : updated));
+      pollNow();
+    } catch (e: any) {
+      setActionNotice(e?.message || 'Falha ao iniciar coleta.');
     } finally {
       setActionLoading(false);
     }
@@ -177,9 +69,13 @@ export const OperationalScreenPage: React.FC = () => {
   const handlePauseCollection = async () => {
     if (!id) return;
     setActionLoading(true);
+    setActionNotice(null);
     try {
       const updated = await collectionsApi.pause(id);
-      setCollection(updated);
+      setCollection((prev) => (prev ? { ...prev, ...updated } : updated));
+      pollNow();
+    } catch (e: any) {
+      setActionNotice(e?.message || 'Falha ao pausar coleta.');
     } finally {
       setActionLoading(false);
     }
@@ -188,9 +84,13 @@ export const OperationalScreenPage: React.FC = () => {
   const handleResumeCollection = async () => {
     if (!id) return;
     setActionLoading(true);
+    setActionNotice(null);
     try {
       const updated = await collectionsApi.resume(id);
-      setCollection(updated);
+      setCollection((prev) => (prev ? { ...prev, ...updated } : updated));
+      pollNow();
+    } catch (e: any) {
+      setActionNotice(e?.message || 'Falha ao retomar coleta.');
     } finally {
       setActionLoading(false);
     }
@@ -199,147 +99,54 @@ export const OperationalScreenPage: React.FC = () => {
   const handleFinishCollection = async () => {
     if (!id) return;
     setActionLoading(true);
+    setActionNotice(null);
     try {
+      handleTimerExpiredLocally();
       const updated = await collectionsApi.finish(id);
-      setCollection(updated);
+      setCollection((prev) => (prev ? { ...prev, ...updated } : updated));
       navigate(`/coletas/${id}`);
+    } catch (e: any) {
+      setActionNotice(e?.message || 'Falha ao encerrar coleta.');
     } finally {
       setActionLoading(false);
     }
+  };
+
+  const handleTimerExpired = () => {
+    if (!id) return;
+    handleTimerExpiredLocally();
+    collectionsApi.finish(id).catch(() => {});
+    if (autoFinishRedirectTimerRef.current) {
+      clearTimeout(autoFinishRedirectTimerRef.current);
+    }
+    autoFinishRedirectTimerRef.current = setTimeout(() => {
+      navigate(`/coletas/${id}`);
+    }, 3000);
   };
 
   const handleReopenCollection = async () => {
     if (!id) return;
     setActionLoading(true);
+    setActionNotice(null);
+    if (autoFinishRedirectTimerRef.current) {
+      clearTimeout(autoFinishRedirectTimerRef.current);
+      autoFinishRedirectTimerRef.current = null;
+    }
     try {
       const updated = await collectionsApi.reopen(id, 'Reaberta pelo aferidor');
-      setCollection(updated);
+      setCollection((prev) => (prev ? { ...prev, ...updated } : updated));
+      pollNow();
+    } catch (e: any) {
+      if (e?.code === 'TIMER_EXPIRED' || e?.status === 409) {
+        setActionNotice(
+          'O tempo limite já foi atingido. Aumente ou remova o limite de tempo para reabrir a aferição.'
+        );
+        setOpenDurationSignal((s) => s + 1);
+      } else {
+        setActionNotice(e?.message || 'Falha ao reabrir coleta.');
+      }
     } finally {
       setActionLoading(false);
-    }
-  };
-
-  const handleRegisterArrival = (queueId?: string) => {
-    if (!id) return;
-    const idempotencyKey = `arr-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    const nowIso = new Date().toISOString();
-
-    // 1. Atualização otimista imediata (0ms)
-    setTotalArrivals((prev) => prev + 1);
-
-    const optimisticEvent: EventItem = {
-      id: idempotencyKey,
-      collectionId: id,
-      eventType: 'ARRIVAL',
-      queueId,
-      occurredAt: nowIso,
-      recordedAt: nowIso,
-      idempotencyKey,
-      isVoided: false,
-    };
-    applyEventCreated(optimisticEvent);
-
-    if (!isOnline) {
-      enqueueOfflineEvent({
-        id: idempotencyKey,
-        collectionId: id,
-        eventType: 'ARRIVAL',
-        queueId,
-        occurredAt: nowIso,
-      });
-      return;
-    }
-
-    // 2. Disparo assíncrono em background
-    eventsApi
-      .create(id, {
-        eventType: 'ARRIVAL',
-        queueId,
-        idempotencyKey,
-        occurredAt: nowIso,
-      })
-      .then((newEvent) => {
-        processedEventIds.current.add(newEvent.id);
-        setRecentEvents((prev) => prev.map((e) => (e.id === idempotencyKey ? newEvent : e)));
-      })
-      .catch((e) => {
-        console.error('Falha ao registrar chegada:', e);
-        setTotalArrivals((prev) => Math.max(0, prev - 1));
-        setRecentEvents((prev) => prev.filter((e) => e.id !== idempotencyKey));
-      });
-  };
-
-  const handleStartService = async (attendantId: string) => {
-    if (!id) return;
-    const tempIntervalId = `opt-srv-${Date.now()}`;
-    const optimisticInterval = {
-      id: tempIntervalId,
-      collectionId: id,
-      attendantId,
-      startedAt: new Date().toISOString(),
-    };
-
-    // 1. Atualização otimista imediata
-    setActiveServices((prev) => {
-      if (prev.some((s) => s.attendantId === attendantId)) return prev;
-      return [...prev, optimisticInterval];
-    });
-
-    // 2. Disparo assíncrono em background
-    servicesApi
-      .startService(id, { attendantId })
-      .then((realInterval) => {
-        setActiveServices((prev) =>
-          prev.map((s) => (s.id === tempIntervalId ? realInterval : s))
-        );
-      })
-      .catch((e: any) => {
-        console.error('Falha ao iniciar atendimento:', e);
-        setActiveServices((prev) => prev.filter((s) => s.id !== tempIntervalId));
-        alert(e?.message || 'Falha ao iniciar atendimento.');
-      });
-  };
-
-  const handleFinishService = async (attendantId: string, serviceId?: string) => {
-    if (!id) return;
-    const idempotencyKey = `del-${attendantId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-
-    // 1. Atualização otimista imediata
-    setActiveServices((prev) => prev.filter((s) => s.attendantId !== attendantId));
-    setDeliveriesByAttendant((prev) => ({
-      ...prev,
-      [attendantId]: (prev[attendantId] || 0) + 1,
-    }));
-
-    // 2. Disparo assíncrono em background
-    servicesApi
-      .finishService(id, {
-        attendantId,
-        serviceIntervalId: serviceId?.startsWith('opt-') ? undefined : serviceId,
-        idempotencyKey,
-      })
-      .then((result) => {
-        if (result.event) {
-          applyEventCreated(result.event);
-        }
-      })
-      .catch((e: any) => {
-        console.error('Falha ao concluir atendimento:', e);
-        setDeliveriesByAttendant((prev) => ({
-          ...prev,
-          [attendantId]: Math.max(0, (prev[attendantId] || 1) - 1),
-        }));
-        alert(e?.message || 'Falha ao concluir atendimento.');
-      });
-  };
-
-  const handleVoidEvent = async (eventId: string, reason: string) => {
-    if (!id) return;
-    try {
-      const updated = await eventsApi.void(id, eventId, reason);
-      applyEventVoided(updated);
-    } catch (e: any) {
-      alert(e?.message || 'Falha ao anular evento.');
     }
   };
 
@@ -362,9 +169,31 @@ export const OperationalScreenPage: React.FC = () => {
         onResume={handleResumeCollection}
         onFinish={handleFinishCollection}
         onReopen={handleReopenCollection}
-        onCollectionUpdated={(updated) => setCollection(updated)}
+        onTimerExpired={handleTimerExpired}
+        onCollectionUpdated={(updated) => {
+          setCollection((prev) => (prev ? { ...prev, ...updated } : updated));
+          setActionNotice(null);
+          pollNow();
+        }}
         isActionLoading={actionLoading}
+        openDurationSignal={openDurationSignal}
       />
+
+      {actionNotice && (
+        <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg flex items-center justify-between gap-2 text-rose-800 text-xs">
+          <div className="flex items-center gap-2 font-medium">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionNotice(null)}
+            className="text-rose-700 hover:text-rose-900 font-semibold px-2"
+          >
+            Fechar
+          </button>
+        </div>
+      )}
 
       {/* Barra de Ações Rápidas */}
       <div className="flex items-center justify-between gap-2 bg-white p-2.5 rounded-lg border border-slate-200">
@@ -412,18 +241,18 @@ export const OperationalScreenPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Botão de Chegada */}
+      {/* Botão de Chegada Instantâneo */}
       <ArrivalButton
         totalArrivals={totalArrivals}
-        onRegisterArrival={handleRegisterArrival}
+        onRegisterArrival={(queueId) => registerArrival(queueId)}
         isCollectionActive={isCollectionActive}
         queues={collection.queues}
       />
 
-      {/* Cartões dos Atendentes com Estados Iniciar e Finalizou Atendimento */}
+      {/* Cartões dos Atendentes com Estados Derivados Estáveis */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {collection.attendants.map((att) => {
-          const activeForAtt = activeServices.find((s) => s.attendantId === att.id);
+          const activeForAtt = activeServicesByAttendant[att.id];
           const count = deliveriesByAttendant[att.id] || 0;
 
           return (
@@ -432,18 +261,20 @@ export const OperationalScreenPage: React.FC = () => {
               attendant={att}
               deliveriesCount={count}
               activeService={activeForAtt}
-              onStartService={handleStartService}
-              onFinishService={handleFinishService}
+              onStartService={startService}
+              onFinishService={finishService}
               isCollectionActive={isCollectionActive}
             />
           );
         })}
       </div>
 
-      {/* Registro Rápido e Desfazer em Retângulos de Atendimento */}
+      {/* Mini Log com Status "Registrando..." e Transição Permanente Sem Duplicação */}
       <EventLogQuickView
-        events={recentEvents}
-        onVoidEvent={handleVoidEvent}
+        items={logItems}
+        onVoidItem={voidEvent}
+        onRetryItem={retryOp}
+        onDismissItem={dismissOp}
         isCollectionActive={isCollectionActive}
       />
 

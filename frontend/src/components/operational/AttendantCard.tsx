@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Attendant } from '../../api/collections.js';
 import { Button } from '../common/Button.js';
-import { playSuccessBeep, triggerHaptic } from '../../utils/sound.js';
+import { playSuccessBeep, playArrivalClick, triggerHaptic } from '../../utils/sound.js';
 import { formatSecondsToStopwatch } from '../../utils/formatters.js';
+import { serverNow } from '../../operational/clock.js';
 import { CheckCircle2, Play } from 'lucide-react';
 
 interface AttendantCardProps {
@@ -37,17 +38,18 @@ export const AttendantCard: React.FC<AttendantCardProps> = ({
 
     const start = new Date(activeService.startedAt).getTime();
     const update = () => {
-      setElapsedServiceSeconds(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+      setElapsedServiceSeconds(Math.max(0, Math.floor((serverNow() - start) / 1000)));
     };
 
     update();
-    const timer = setInterval(update, 1000);
+    const timer = setInterval(update, 500);
     return () => clearInterval(timer);
   }, [activeService]);
 
   const handleStart = () => {
     if (!isCollectionActive) return;
     triggerHaptic(35);
+    playArrivalClick();
     onStartService(attendant.id);
   };
 

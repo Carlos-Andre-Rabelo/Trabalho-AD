@@ -1,6 +1,7 @@
 import { prisma } from '../../config/prisma.js';
 import { AppError } from '../../middleware/errorHandler.js';
-import { MeasurementMethod } from '@prisma/client';
+import { CollectionStatus, MeasurementMethod } from '@prisma/client';
+import { collectionsService } from '../collections/collections.service.js';
 
 export interface CreateProteinMeasurementInput {
   attendantId: string;
@@ -13,12 +14,22 @@ export interface CreateProteinMeasurementInput {
 
 export class ProteinService {
   async create(userId: string, collectionId: string, input: CreateProteinMeasurementInput) {
+    await collectionsService.enforceDeadline(collectionId);
+
     const collection = await prisma.collection.findFirst({
       where: { id: collectionId },
     });
 
     if (!collection) {
       throw new AppError('Coleta não encontrada.', 404);
+    }
+
+    if (collection.status !== CollectionStatus.IN_PROGRESS) {
+      throw new AppError(
+        `Medições só podem ser registradas enquanto a coleta estiver em andamento. Status atual: ${collection.status}`,
+        400,
+        'INVALID_COLLECTION_STATUS'
+      );
     }
 
     if (input.amount <= 0) {

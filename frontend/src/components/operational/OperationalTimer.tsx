@@ -5,6 +5,7 @@ import { Play, Pause, Square, RotateCcw, Timer, AlertTriangle, Clock } from 'luc
 import { Button } from '../common/Button.js';
 import { Badge } from '../common/Badge.js';
 import { playTimerEndAlert, playTimerWarningBeep, triggerHaptic } from '../../utils/sound.js';
+import { serverNow } from '../../operational/clock.js';
 import { Modal } from '../common/Modal.js';
 
 interface OperationalTimerProps {
@@ -14,8 +15,10 @@ interface OperationalTimerProps {
   onResume: () => void;
   onFinish: () => void;
   onReopen: () => void;
+  onTimerExpired?: () => void;
   onCollectionUpdated?: (updated: Collection) => void;
   isActionLoading?: boolean;
+  openDurationSignal?: number;
 }
 
 export const OperationalTimer: React.FC<OperationalTimerProps> = ({
@@ -25,8 +28,10 @@ export const OperationalTimer: React.FC<OperationalTimerProps> = ({
   onResume,
   onFinish,
   onReopen,
+  onTimerExpired,
   onCollectionUpdated,
   isActionLoading = false,
+  openDurationSignal = 0,
 }) => {
   const [secondsElapsed, setSecondsElapsed] = useState<number>(0);
   const [isDurationModalOpen, setIsDurationModalOpen] = useState(false);
@@ -38,6 +43,13 @@ export const OperationalTimer: React.FC<OperationalTimerProps> = ({
 
   const hasAutoFinishedRef = useRef(false);
   const warnedAt60Ref = useRef(false);
+  const prevStatusRef = useRef(collection.status);
+
+  useEffect(() => {
+    if (openDurationSignal > 0) {
+      setIsDurationModalOpen(true);
+    }
+  }, [openDurationSignal]);
 
   // Fallback inteligente para garantir extração de targetDurationMinutes mesmo de notes
   const targetDurationMinutes = useMemo(() => {
@@ -62,15 +74,32 @@ export const OperationalTimer: React.FC<OperationalTimerProps> = ({
     setTargetMinutesInput(targetDurationMinutes ? String(targetDurationMinutes) : '');
   }, [targetDurationMinutes]);
 
-  // Reseta travas de encerramento quando a coleta está em DRAFT
+  const targetSeconds = targetDurationMinutes ? targetDurationMinutes * 60 : null;
+
+  // Reseta travas quando a coleta está em DRAFT ou tem novo limite maior que o tempo decorrido
   useEffect(() => {
     if (collection.status === 'DRAFT') {
       hasAutoFinishedRef.current = false;
       warnedAt60Ref.current = false;
+      setAutoFinishedNotice(false);
+    } else if (collection.status === 'IN_PROGRESS' && targetSeconds && secondsElapsed < targetSeconds) {
+      hasAutoFinishedRef.current = false;
     }
-  }, [collection.status]);
-
-  const targetSeconds = targetDurationMinutes ? targetDurationMinutes * 60 : null;
+    if (
+      prevStatusRef.current === 'IN_PROGRESS' &&
+      collection.status === 'FINISHED' &&
+      targetSeconds &&
+      secondsElapsed >= targetSeconds - 2
+    ) {
+      if (!hasAutoFinishedRef.current) {
+        hasAutoFinishedRef.current = true;
+        playTimerEndAlert();
+        triggerHaptic(500);
+      }
+      setAutoFinishedNotice(true);
+    }
+    prevStatusRef.current = collection.status;
+  }, [collection.status, targetSeconds, secondsElapsed]);
 
   useEffect(() => {
     if (!collection.startedAt) {
@@ -79,23 +108,26 @@ export const OperationalTimer: React.FC<OperationalTimerProps> = ({
     }
 
     const calcSeconds = () => {
+      const nowMs = serverNow();
       const start = new Date(collection.startedAt!).getTime();
-      const end = collection.endedAt ? new Date(collection.endedAt).getTime() : Date.now();
-      const diffSec = Math.max(0, Math.floor((end - start) / 1000));
+      const end = collection.endedAt ? new Date(collection.endedAt).getTime() : nowMs;
+      const diffMs = Math.max(0, end - start);
 
-      let pausesSec = 0;
+      let pausesMs = 0;
       if (collection.pauses) {
         for (const p of collection.pauses) {
-          const pStart = new Date(p.startedAt).getTime();
-          const pEnd = p.endedAt ? new Date(p.endedAt).getTime() : Date.now();
-          pausesSec += Math.max(0, Math.floor((pEnd - pStart) / 1000));
+          const pStart = Math.max(start, new Date(p.startedAt).getTime());
+          const pEnd = p.endedAt ? Math.min(end, new Date(p.endedAt).getTime()) : end;
+          if (pEnd > pStart) {
+            pausesMs += pEnd - pStart;
+          }
         }
       }
 
-      const activeSeconds = Math.max(0, diffSec - pausesSec);
+      const activeSeconds = Math.max(0, Math.floor((diffMs - pausesMs) / 1000));
       setSecondsElapsed(activeSeconds);
 
-      // Verificação de disparo do cronômetro regressivo
+      // Verificação do cronômetro regressivo sincronizado com o relógio do servidor
       if (targetSeconds && collection.status === 'IN_PROGRESS') {
         const remaining = targetSeconds - activeSeconds;
 
@@ -105,13 +137,13 @@ export const OperationalTimer: React.FC<OperationalTimerProps> = ({
           playTimerWarningBeep();
         }
 
-        // Término automático ao chegar a zero ou ultrapassar
+        // Encerramento imediato e total ao atingir zero
         if (remaining <= 0 && !hasAutoFinishedRef.current) {
           hasAutoFinishedRef.current = true;
           playTimerEndAlert();
           triggerHaptic(500);
           setAutoFinishedNotice(true);
-          onFinish();
+          onTimerExpired?.();
         }
       }
     };
@@ -119,10 +151,10 @@ export const OperationalTimer: React.FC<OperationalTimerProps> = ({
     calcSeconds();
 
     if (collection.status === 'IN_PROGRESS') {
-      const interval = setInterval(calcSeconds, 1000);
+      const interval = setInterval(calcSeconds, 500);
       return () => clearInterval(interval);
     }
-  }, [collection.startedAt, collection.endedAt, collection.status, collection.pauses, targetSeconds, onFinish]);
+  }, [collection.startedAt, collection.endedAt, collection.status, collection.pauses, targetSeconds, onTimerExpired]);
 
   // Cálculos de tempo restante
   const remainingSeconds = targetSeconds !== null ? Math.max(0, targetSeconds - secondsElapsed) : null;
