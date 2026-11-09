@@ -1,10 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Modal } from '../common/Modal.js';
 import { Button } from '../common/Button.js';
 import { getNetworkInfo, NetworkInfo } from '../../api/network.js';
 import { collectionsApi } from '../../api/collections.js';
-import { Copy, Check, RefreshCw, Globe, Wifi, ExternalLink, Share2, Smartphone } from 'lucide-react';
+import {
+  Copy,
+  Check,
+  RefreshCw,
+  Globe,
+  Wifi,
+  ExternalLink,
+  Share2,
+  Smartphone,
+  AlertTriangle,
+  HelpCircle,
+  ShieldAlert,
+} from 'lucide-react';
 
 export interface QrCodeSyncModalProps {
   isOpen: boolean;
@@ -25,6 +37,29 @@ function isPublicHost(hostname: string): boolean {
   return true;
 }
 
+function isVercelDomain(hostname: string): boolean {
+  return hostname.endsWith('.vercel.app');
+}
+
+function isVercelPreview(hostname: string): boolean {
+  if (!isVercelDomain(hostname)) return false;
+  return hostname.includes('-git-') || /-[a-z0-9]{8,}-/.test(hostname);
+}
+
+function getSuggestedProductionUrl(origin: string): string | null {
+  try {
+    const url = new URL(origin);
+    if (!isVercelPreview(url.hostname)) return null;
+
+    const parts = url.hostname.split('.vercel.app')[0];
+    const projectName = parts.split('-git-')[0].split(/-[a-z0-9]{9,}/)[0];
+    if (projectName && projectName !== parts) {
+      return `${url.protocol}//${projectName}.vercel.app`;
+    }
+  } catch {}
+  return null;
+}
+
 export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
   isOpen,
   onClose,
@@ -37,17 +72,23 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
   const [copied, setCopied] = useState(false);
   const [shared, setShared] = useState(false);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
+  const [showVercelHelp, setShowVercelHelp] = useState(false);
 
-  // Host mode: 'public' (origin), 'network' (local wifi IP), 'custom' (manual)
   const currentHostname = typeof window !== 'undefined' ? window.location.hostname : '';
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
   const isDeployPublic = isPublicHost(currentHostname);
+  const isVercel = isVercelDomain(currentHostname);
+  const suggestedProd = useMemo(() => getSuggestedProductionUrl(currentOrigin), [currentOrigin]);
 
-  const [hostMode, setHostMode] = useState<'public' | 'network' | 'custom'>(() => {
+  // Host mode: 'public' (origin), 'production' (canonical vercel), 'network' (local wifi IP), 'custom' (manual)
+  const [hostMode, setHostMode] = useState<'public' | 'production' | 'network' | 'custom'>(() => {
     return isDeployPublic ? 'public' : 'network';
   });
 
   const [selectedIp, setSelectedIp] = useState<string>('');
-  const [customUrl, setCustomUrl] = useState<string>('');
+  const [customUrl, setCustomUrl] = useState<string>(() => {
+    return localStorage.getItem('ru_custom_remote_url') || '';
+  });
 
   useEffect(() => {
     if (!isOpen) return;
@@ -91,16 +132,37 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
     if (initialToken) setToken(initialToken);
   }, [initialToken]);
 
+  const handleCustomUrlChange = (val: string) => {
+    setCustomUrl(val);
+    localStorage.setItem('ru_custom_remote_url', val);
+  };
+
+  // Extrai parâmetros de bypass da Vercel se existirem na URL atual do navegador
+  const vercelBypassParams = useMemo(() => {
+    if (typeof window === 'undefined') return {};
+    const params = new URLSearchParams(window.location.search);
+    const bypass: Record<string, string> = {};
+    const share = params.get('_vercel_share');
+    if (share) bypass['_vercel_share'] = share;
+    const bypassToken = params.get('x-vercel-protection-bypass');
+    if (bypassToken) bypass['x-vercel-protection-bypass'] = bypassToken;
+    return bypass;
+  }, []);
+
   // Montagem da URL remota correta
   let computedBase = '';
   if (hostMode === 'public') {
-    computedBase = typeof window !== 'undefined' ? window.location.origin : '';
+    computedBase = currentOrigin;
+  } else if (hostMode === 'production' && suggestedProd) {
+    computedBase = suggestedProd;
   } else if (hostMode === 'custom') {
     if (customUrl.trim().startsWith('http://') || customUrl.trim().startsWith('https://')) {
       computedBase = customUrl.trim().replace(/\/$/, '');
-    } else {
+    } else if (customUrl.trim()) {
       const proto = window.location.protocol;
       computedBase = `${proto}//${customUrl.trim().replace(/\/$/, '')}`;
+    } else {
+      computedBase = currentOrigin;
     }
   } else {
     // Modo rede local Wi-Fi
@@ -110,7 +172,21 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
     computedBase = `${protocol}//${ip}${port}`;
   }
 
-  const remoteUrl = `${computedBase}/coletas/${collectionId}/remoto${token ? `?token=${token}` : ''}`;
+  // Constrói URL com token do aferidor e parâmetros de bypass se houver
+  const remoteUrlObj = useMemo(() => {
+    try {
+      const u = new URL(`${computedBase}/coletas/${collectionId}/remoto`);
+      if (token) u.searchParams.set('token', token);
+      for (const [k, v] of Object.entries(vercelBypassParams)) {
+        u.searchParams.set(k, v);
+      }
+      return u.toString();
+    } catch {
+      return `${computedBase}/coletas/${collectionId}/remoto${token ? `?token=${token}` : ''}`;
+    }
+  }, [computedBase, collectionId, token, vercelBypassParams]);
+
+  const remoteUrl = remoteUrlObj;
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(remoteUrl);
@@ -135,7 +211,6 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
       }
     }
 
-    // Fallback: abre no WhatsApp
     const whatsappUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(shareText)}`;
     window.open(whatsappUrl, '_blank');
     setShared(true);
@@ -158,6 +233,44 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
             {connectedClientsCount} conectado(s)
           </span>
         </div>
+
+        {/* Alerta Específico se estiver na Vercel */}
+        {isVercel && (
+          <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-amber-900 text-xs space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold text-amber-900">
+                <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>Celular pedindo login da Vercel ao escanear?</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowVercelHelp(!showVercelHelp)}
+                className="text-amber-800 hover:text-amber-950 font-semibold underline text-[11px] flex items-center gap-1"
+              >
+                <HelpCircle className="w-3.5 h-3.5" />
+                <span>{showVercelHelp ? 'Ocultar' : 'Como resolver'}</span>
+              </button>
+            </div>
+
+            <p className="text-[11px] text-amber-800 leading-relaxed">
+              A Vercel ativa proteção por padrão em URLs de teste/preview. No computador você já está logado, mas no celular a Vercel exige autenticação.
+            </p>
+
+            {showVercelHelp && (
+              <div className="pt-2 border-t border-amber-200/80 space-y-1.5 text-[11px] text-amber-950">
+                <p className="font-bold">Para liberar o acesso direto no celular (em 30 segundos):</p>
+                <ol className="list-decimal list-inside space-y-1 pl-1">
+                  <li>Abra o dashboard da <strong>Vercel</strong> e entre no projeto.</li>
+                  <li>Clique na aba <strong>Settings</strong> e depois em <strong>Deployment Protection</strong>.</li>
+                  <li>Na seção <strong>Vercel Authentication</strong>, mude para <strong>Disabled</strong> (Desativado) e salve.</li>
+                </ol>
+                <p className="text-[10px] text-amber-700 italic pt-1">
+                  Feito isso, o QR Code abrirá direto a tela de registro de aferição no celular sem solicitar login.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* QR Code Container */}
         <div className="flex flex-col items-center justify-center p-4 bg-slate-50 border border-slate-200 rounded-lg">
@@ -192,8 +305,24 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
               }`}
             >
               <Globe className="w-3.5 h-3.5" />
-              <span>{isDeployPublic ? 'Vercel / Nuvem' : 'URL Atual'}</span>
+              <span>{isDeployPublic ? 'URL Atual' : 'URL Atual'}</span>
             </button>
+
+            {suggestedProd && (
+              <button
+                type="button"
+                onClick={() => setHostMode('production')}
+                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded text-xs font-medium border transition-colors ${
+                  hostMode === 'production'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                }`}
+                title={`Usar domínio canônico de produção: ${suggestedProd}`}
+              >
+                <Globe className="w-3.5 h-3.5 text-emerald-500" />
+                <span>Produção</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -223,7 +352,13 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
 
           {hostMode === 'public' && (
             <div className="p-2 bg-blue-50 border border-blue-200 rounded text-[11px] text-blue-900 leading-relaxed">
-              <strong>URL Web Pública:</strong> Funciona em qualquer lugar pelo 4G, 5G ou Wi-Fi. Ideal para uso publicado na Vercel.
+              <strong>URL Web Atual:</strong> Usa o mesmo domínio que você está acessando no computador ({currentHostname}).
+            </div>
+          )}
+
+          {hostMode === 'production' && suggestedProd && (
+            <div className="p-2 bg-emerald-50 border border-emerald-200 rounded text-[11px] text-emerald-900 leading-relaxed">
+              <strong>Domínio Canônico de Produção:</strong> <code>{suggestedProd}</code>. Ideal caso a sua URL atual seja um preview temporário.
             </div>
           )}
 
@@ -243,7 +378,7 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
                 <option value="localhost">localhost (apenas neste dispositivo)</option>
               </select>
               <p className="text-[10px] text-slate-500">
-                O celular e o computador devem estar conectados no mesmo Wi-Fi.
+                O celular e o computador devem estar conectados no mesmo Wi-Fi (usado para execução local).
               </p>
             </div>
           )}
@@ -255,7 +390,7 @@ export const QrCodeSyncModal: React.FC<QrCodeSyncModalProps> = ({
                 type="text"
                 placeholder="https://seu-dominio.vercel.app"
                 value={customUrl}
-                onChange={(e) => setCustomUrl(e.target.value)}
+                onChange={(e) => handleCustomUrlChange(e.target.value)}
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono text-xs"
               />
             </div>
